@@ -210,4 +210,4 @@ Option C is a 1-2 day project: add a Netlify Function that talks to Netlify Blob
 → Browser model choice doesn't match server allowlist. Usually happens after a model selector update — refresh the page.
 
 **Can't see clients after switching browsers/devices**
-→ Expected. Client profiles are per-browser. Either re-enter them, or migrate to Option C.
+→ Expected. Client profiles are per-browser. Either re-enter them, or migrate to Option C..
