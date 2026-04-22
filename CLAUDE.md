@@ -2,6 +2,10 @@
 
 *A running log of gotchas, workarounds, and principles learned while building this app. Read this before making non-trivial changes.*
 
+## Workflow: push direct, no PRs
+
+This project deploys via Netlify on push. **Do not create or suggest pull requests.** The user pushes directly to the deploy branch for fast iteration. Only open a PR if the user explicitly asks for one.
+
 ## The cache trap (the one that ate an hour)
 
 `netlify.toml` was shipped with:
