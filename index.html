@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WordPress Publisher</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="container topbar-inner">
+    <div class="brand">WordPress Publisher</div>
+    <div class="topbar-right">
+      <select id="active-client" class="client-selector" aria-label="Active client">
+        <option value="">No client selected</option>
+      </select>
+      <div id="conn-indicator" class="conn-indicator conn-off">Not connected</div>
+    </div>
+  </div>
+</header>
+
+<main class="container main">
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="brief">1. Brief</button>
+    <button class="tab" data-tab="draft">2. Draft</button>
+    <button class="tab" data-tab="queue">Queue</button>
+    <button class="tab" data-tab="images">Images</button>
+    <button class="tab" data-tab="clients">Clients</button>
+    <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="activity">Activity <span id="activity-badge" class="tab-badge hidden"></span></button>
+    <button class="tab" data-tab="settings">Settings</button>
+  </nav>
+
+  <!-- BRIEF -->
+  <section id="tab-brief" class="tab-panel active">
+    <div id="no-client-brief" class="card center-block hidden">
+      <p class="muted">No client selected. Add a client to get started.</p>
+      <button class="btn" data-switch-tab="clients">Go to Clients →</button>
+    </div>
+
+    <div id="brief-content">
+      <div class="card">
+        <div class="welcome">
+          <h2>Start with the brief</h2>
+          <p>A complete brief cuts drafting rounds from 4-5 down to 1-2.</p>
+        </div>
+        <hr>
+
+        <div class="brief-row">
+          <label for="b-title">Working title</label>
+          <input type="text" id="b-title" placeholder="e.g. Spring pool opening checklist">
+        </div>
+        <div class="brief-row">
+          <label for="b-audience">Audience</label>
+          <input type="text" id="b-audience" placeholder="e.g. Pool owners in Wisconsin">
+        </div>
+        <div class="brief-row">
+          <label for="b-angle">Angle</label>
+          <textarea id="b-angle" rows="2" placeholder="What's the hook?"></textarea>
+        </div>
+        <div class="brief-row">
+          <label for="b-key">Key message</label>
+          <textarea id="b-key" rows="2" placeholder="The one takeaway"></textarea>
+        </div>
+        <div class="brief-row">
+          <label for="b-must">Must include</label>
+          <textarea id="b-must" rows="2" placeholder="Terms, products, links, stats"></textarea>
+        </div>
+        <div class="brief-row">
+          <label for="b-cta">Call to action</label>
+          <input type="text" id="b-cta" placeholder="e.g. Book a consultation">
+        </div>
+        <div class="brief-row">
+          <label for="b-length">Length</label>
+          <select id="b-length">
+            <option value="short">Short (~300 words)</option>
+            <option value="medium" selected>Medium (~600 words)</option>
+            <option value="long">Long (~1000 words)</option>
+          </select>
+        </div>
+        <div class="brief-row">
+          <label>Images</label>
+          <div>
+            <div id="b-img-list" class="muted">No images attached yet</div>
+            <button class="btn btn-sm" data-switch-tab="images">Manage images →</button>
+          </div>
+        </div>
+
+        <hr>
+        <button class="btn btn-primary btn-wide" id="gen-btn">Generate draft with Claude</button>
+        <p class="small-note center-text margin-top-small">
+          Using <span id="current-model-label">Sonnet 4.6</span> · <a href="#" data-switch-tab="settings">change</a>
+        </p>
+        <div id="brief-status" class="status"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DRAFT -->
+  <section id="tab-draft" class="tab-panel">
+    <div id="no-draft-msg" class="card center-block">
+      <p class="muted">No draft yet — fill in the brief first</p>
+      <button class="btn" data-switch-tab="brief">Go to brief →</button>
+    </div>
+
+    <div id="draft-section" class="hidden">
+      <div class="card">
+        <div class="field">
+          <label class="lbl" for="post-title">Title</label>
+          <input type="text" id="post-title" placeholder="Post title">
+        </div>
+
+        <div class="field">
+          <label class="lbl" for="editor">Content</label>
+          <div class="toolbar" id="toolbar">
+            <button class="tb-btn" data-wrap="<h2>|</h2>">H2</button>
+            <button class="tb-btn" data-wrap="<h3>|</h3>">H3</button>
+            <div class="tb-sep"></div>
+            <button class="tb-btn tb-btn-bold" data-wrap="<strong>|</strong>">B</button>
+            <button class="tb-btn tb-btn-italic" data-wrap="<em>|</em>">I</button>
+            <div class="tb-sep"></div>
+            <button class="tb-btn" data-action="list-ul">UL</button>
+            <button class="tb-btn" data-action="list-ol">OL</button>
+            <button class="tb-btn" data-wrap="<blockquote>|</blockquote>">&ldquo;</button>
+            <div class="tb-sep"></div>
+            <button class="tb-btn" data-action="link">Link</button>
+            <button class="tb-btn" data-action="image">Img</button>
+            <button class="tb-btn" data-action="hr">HR</button>
+          </div>
+          <textarea id="editor" spellcheck="true"></textarea>
+        </div>
+
+        <div class="field">
+          <div class="view-toggle">
+            <button class="vt-btn active" data-view="html">HTML</button>
+            <button class="vt-btn" data-view="preview">Preview</button>
+          </div>
+          <div id="preview-box" class="preview-area hidden"></div>
+        </div>
+
+        <hr>
+
+        <div class="lbl section-lbl">Publish options</div>
+        <div class="row2">
+          <div class="field">
+            <label class="lbl" for="post-status">Workflow</label>
+            <select id="post-status">
+              <option value="draft">Save as draft (private)</option>
+              <option value="pending" selected>Pending review (client approves)</option>
+              <option value="future">Schedule for later</option>
+              <option value="publish">Publish now</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="lbl" for="post-tags">Tags</label>
+            <input type="text" id="post-tags" placeholder="comma, separated">
+          </div>
+        </div>
+
+        <div class="field hidden" id="schedule-field">
+          <label class="lbl" for="post-schedule">Publish at</label>
+          <input type="datetime-local" id="post-schedule">
+        </div>
+
+        <div class="field">
+          <label class="lbl" for="feat-img">Featured image</label>
+          <select id="feat-img"><option value="">None</option></select>
+        </div>
+
+        <button class="btn btn-primary btn-wide" id="pub-btn">Send to WordPress</button>
+        <div id="pub-status" class="status"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- QUEUE -->
+  <section id="tab-queue" class="tab-panel">
+    <div class="card">
+      <div class="lbl section-lbl">Posts for <span id="queue-client-name">current client</span></div>
+      <button class="btn btn-sm" id="refresh-btn">Refresh</button>
+      <div id="queue-list" class="queue-list"></div>
+      <div id="queue-status" class="status"></div>
+    </div>
+  </section>
+
+  <!-- IMAGES -->
+  <section id="tab-images" class="tab-panel">
+    <div class="card">
+      <div class="lbl section-lbl">Upload images to <span id="images-client-name">current client</span>'s media library</div>
+      <div class="drop-zone" id="drop-zone">
+        <div>Drop images here or click to browse</div>
+        <div class="muted small">JPEG, PNG, WebP, GIF</div>
+      </div>
+      <input type="file" id="file-input" accept="image/*" multiple class="hidden">
+      <div id="img-grid" class="img-grid"></div>
+      <div id="upload-status" class="status"></div>
+      <p class="small-note">Images upload to the active client's WordPress media library. They're available for the brief and for inserting into the draft.</p>
+    </div>
+  </section>
+
+  <!-- CLIENTS -->
+  <section id="tab-clients" class="tab-panel">
+    <div class="card">
+      <div class="clients-header">
+        <div class="lbl section-lbl">Client profiles</div>
+        <button class="btn btn-primary btn-sm" id="add-client-btn">+ Add client</button>
+      </div>
+      <div id="client-list" class="client-list"></div>
+    </div>
+
+    <!-- Client editor form (appears when adding or editing) -->
+    <div id="client-editor" class="card hidden">
+      <div class="lbl section-lbl" id="client-editor-title">Add client</div>
+      <div class="field">
+        <label class="lbl" for="c-name">Client name</label>
+        <input type="text" id="c-name" placeholder="e.g. Acme Pools">
+        <p class="small-note">For your reference only — not sent anywhere</p>
+      </div>
+      <div class="field">
+        <label class="lbl" for="c-url">WordPress site URL</label>
+        <input type="url" id="c-url" placeholder="https://clientsite.com">
+        <p class="small-note">Root URL, no trailing slash, no /wp-admin/</p>
+      </div>
+      <div class="field">
+        <label class="lbl" for="c-user">WordPress username</label>
+        <input type="text" id="c-user">
+      </div>
+      <div class="field">
+        <label class="lbl" for="c-pass">Application password</label>
+        <input type="password" id="c-pass">
+        <p class="small-note">Generate in WordPress → Users → Profile → Application Passwords</p>
+      </div>
+      <hr>
+      <div class="lbl section-lbl">Client voice guide (optional but recommended)</div>
+      <p class="small-note margin-bottom-med">How this client writes — tone, preferred phrases, words to avoid. Claude reads this before every draft for this client.</p>
+      <div class="field">
+        <label class="lbl" for="c-voice">Voice guide</label>
+        <textarea id="c-voice" rows="6" placeholder="Example:
+- Write in first person plural (we)
+- Warm and practical, never salesy
+- Short sentences, active voice
+- Avoid: 'leverage', 'synergy'
+- Always mention local Wisconsin context"></textarea>
+      </div>
+      <div class="field">
+        <label class="lbl" for="c-sample">Sample paragraph (optional)</label>
+        <textarea id="c-sample" rows="4" placeholder="A paragraph this client has approved — Claude will match its rhythm."></textarea>
+      </div>
+      <hr>
+      <button class="btn btn-primary" id="save-client-btn">Save client</button>
+      <button class="btn" id="test-client-btn">Test connection</button>
+      <button class="btn" id="cancel-client-btn">Cancel</button>
+      <div id="client-editor-status" class="status"></div>
+    </div>
+
+    <!-- Export / Import (Tier 1 shared-storage workaround) -->
+    <div class="card">
+      <div class="lbl section-lbl">Share clients with teammates</div>
+      <p class="small-note margin-bottom-med">
+        Export downloads a JSON file containing all your client profiles <strong>including Application Passwords</strong>.
+        Share via 1Password, Signal, or an encrypted channel — <strong>never email</strong>.
+        The recipient uses Import to load the profiles on their workstation.
+      </p>
+      <button class="btn btn-primary" id="export-clients-btn">Export clients</button>
+      <button class="btn" id="import-clients-btn">Import clients</button>
+      <input type="file" id="import-clients-file" accept="application/json,.json" class="hidden">
+      <div id="clients-io-status" class="status"></div>
+    </div>
+  </section>
+
+  <!-- HISTORY -->
+  <section id="tab-history" class="tab-panel">
+    <div class="card">
+      <div class="lbl section-lbl">Recent activity across all clients</div>
+      <p class="small-note margin-bottom-med">Shows the last 20 posts from each client's WordPress site. Uses WordPress's own record — no separate log kept.</p>
+      <button class="btn btn-sm" id="refresh-history-btn">Refresh all clients</button>
+      <div id="history-list" class="history-list"></div>
+      <div id="history-status" class="status"></div>
+    </div>
+  </section>
+
+  <!-- ACTIVITY -->
+  <section id="tab-activity" class="tab-panel">
+    <div class="card">
+      <div class="activity-header">
+        <div>
+          <div class="lbl section-lbl">Activity log</div>
+          <p class="small-note">In-memory log of the last 200 events — requests, errors, uploads. Cleared on page reload. Click any row to see full details; use Copy to grab a paste-ready bug report.</p>
+        </div>
+        <button class="btn btn-sm" id="clear-log-btn">Clear</button>
+      </div>
+      <div id="activity-list" class="activity-list"></div>
+    </div>
+  </section>
+
+  <!-- SETTINGS -->
+  <section id="tab-settings" class="tab-panel">
+    <div class="card">
+      <div class="lbl section-lbl">Claude model</div>
+      <p class="small-note">Applies to all clients. Cheaper models are faster and fine for iterating on a brief; use Opus only for final polish on important posts.</p>
+      <div class="field">
+        <label class="lbl" for="model-select">Model</label>
+        <select id="model-select">
+          <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fastest, ~$0.007 per draft</option>
+          <option value="claude-sonnet-4-6" selected>Sonnet 4.6 — balanced, ~$0.022 per draft</option>
+          <option value="claude-opus-4-7">Opus 4.7 — highest quality, ~$0.035 per draft</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="save-model-btn">Save model</button>
+      <span class="saved-indicator hidden" id="model-saved">✓ Saved</span>
+    </div>
+
+    <div class="card">
+      <div class="lbl section-lbl">Claude API</div>
+      <p class="small-note">
+        Draft generation is handled by a secure server-side function. The Anthropic API key lives in Netlify's environment
+        variables and is never sent to your browser.
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="lbl section-lbl">How approval works</div>
+      <p class="small-note">
+        When you pick <strong>Pending review</strong> as the workflow, the post is saved in that client's WordPress with status "pending".
+        The client can review it in their WP dashboard under Posts → Pending and publish with one click — no email thread needed.
+      </p>
+    </div>
+
+    <div class="card danger-card">
+      <div class="lbl section-lbl danger-lbl">Danger zone</div>
+      <p class="small-note margin-bottom-med">Clears all saved clients, credentials, and preferences from this browser.</p>
+      <button class="btn btn-danger" id="clear-all-btn">Clear all local data</button>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="container">
+    <span class="muted small">Client credentials saved to this browser only — never transmitted except to the specific client's WordPress site.</span>
+  </div>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
