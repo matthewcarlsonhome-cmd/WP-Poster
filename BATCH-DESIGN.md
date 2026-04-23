@@ -1,10 +1,16 @@
-# BATCH-DESIGN.md — Batch brief entry and bulk Pending-Review publish
+# BATCH-DESIGN.md — Batch brief entry and bulk Draft/Pending publish
 
-*Design for the "write 15 posts in one sitting, push them all to WordPress as Pending Review" workflow. Read DESIGN-DOC.md first — this builds on the single-post architecture and reuses its primitives.*
+*Design for the "write 15 posts in one sitting, push them all to WordPress as Draft or Pending Review" workflow. Read DESIGN-DOC.md first — this builds on the single-post architecture and reuses its primitives.*
 
 ## One-line summary
 
-A new **Batch** tab that lets one operator stage up to 15 briefs for the active client, generate them all in one run, review/edit, then publish the entire set to WordPress as Pending Review — with per-row progress, per-row retry, and resume-on-reload.
+A new **Batch** tab that lets one operator stage up to 15 briefs for the active client, generate them all in one run (with built-in SEO/GEO/AEO optimization), review/edit, then send the entire set to WordPress as Draft or Pending Review — never auto-Publish.
+
+## What ships today (same-day MVP)
+
+Paste up to 15 briefs into a new Batch tab, click **Generate** to have Claude write them all (optimized for SEO, GEO, and AEO in one pass), review or edit each one inline, then click **Send** to push the whole set to WordPress as either **Draft** or **Pending Review** — your choice at send time. That's it.
+
+What's **not** in the same-day build (lands in Phase 2 next week): fancy concurrency tuning, polished per-row retry, resume-on-reload after a browser close, brief templates, and bulk CSV paste. Those are all designed below but deliberately left out of the first cut so we can ship today and iterate on real usage.
 
 ## Why now
 
@@ -14,7 +20,7 @@ Today's flow is one-at-a-time: fill brief → Generate → review → Publish �
 
 1. **Stage before spend.** Briefs can be drafted, reordered, edited, and saved without touching the Anthropic API. You pay only when you click Generate All.
 2. **One client per batch, many posts.** v1 does not support "same brief to three clients." See *What v1 explicitly is NOT*.
-3. **Pending Review is the default and the only status.** The point of batching is reviewer-handoff. Draft, Publish, and Scheduled remain available on the single-post flow.
+3. **Draft or Pending Review only — never auto-Publish.** A batch sends every post in "Draft" or "Pending Review" state (operator picks per-batch at send time). Publishing live is reserved for single-post flow; a batch can't ever push content live by mistake.
 4. **Resumable.** A reload mid-batch does not lose briefs or already-generated content. Only in-flight generates are re-tried.
 5. **Per-row failure isolation.** One bad brief, one WordPress 5xx, or one model JSON-parse failure does not abort the other 14 rows.
 6. **Reuse, don't fork.** `apiCall`, `parseJsonFromModel`, `sanitizeHtml`, `publishPost`'s request shape, `diagnoseError`, and `showErrorBanner` are all reused as-is. No parallel code paths to maintain.
@@ -29,11 +35,115 @@ Today's flow is one-at-a-time: fill brief → Generate → review → Publish �
      → progress bar, per-row status pill flips draft → generating → generated/error
      → one-at-a-time with configurable concurrency (default 3)
 5. Review. Click any row to expand the generated post and edit inline.
-6. Click "Send all to WordPress as Pending Review"
-     → per-row publishing → published/error pill
+6. Choose Draft or Pending Review, click "Send all to WordPress"
+     → per-row publishing → sent/error pill
      → final summary: "13 sent, 2 failed (retry)"
 7. Client sees all 13 in their WP Posts → Pending queue.
 ```
+
+## SEO / GEO / AEO optimization (baked into every batch post)
+
+Every brief generated through the batch tab is optimized for three overlapping discovery channels, without the operator having to think about it. The operator provides a **Primary keyword** per row (and optional secondary keywords); the prompt handles the rest.
+
+**What each acronym means, in plain terms:**
+
+| | Stands for | What it targets | What it favors |
+|---|---|---|---|
+| **SEO** | Search Engine Optimization | Traditional Google results | Keyword placement, meta description, heading structure, alt text, word count |
+| **GEO** | Generative Engine Optimization | ChatGPT, Perplexity, Google AI Overviews | Citation-worthy facts, declarative sentences, clean semantic hierarchy, E-E-A-T signals |
+| **AEO** | Answer Engine Optimization | Featured snippets, "People Also Ask", voice assistants | Short self-contained answers, question-form headings, FAQ sections |
+
+**New per-row brief field:**
+
+| Field | Required? | Example |
+|---|---|---|
+| `primaryKeyword` | Yes | "Virginia Beach pool winterization" |
+| `secondaryKeywords` | No | "pool closing, off-season pool care" |
+| `targetLocation` | Auto-filled from client profile if available | "Virginia Beach, VA" |
+
+**Prompt additions (appended to the existing voice/brief/image/JSON-spec prompt):**
+
+```
+SEO / GEO / AEO OPTIMIZATION REQUIREMENTS
+
+You are writing content that must perform in three channels at once:
+  traditional search (Google), generative search (LLMs / AI Overviews),
+  and answer engines (featured snippets / voice). Follow every rule
+  below unless it would produce unnatural prose.
+
+1. TL;DR ANSWER FIRST
+   - Open with a 40–60 word direct answer to the post's core question.
+   - This paragraph must stand alone as a quotable snippet.
+   - Include the primary keyword within this opening.
+
+2. KEYWORD PLACEMENT (natural, not stuffed)
+   - Primary keyword: in the title, the first 100 words, and 2–3 H2s.
+   - Secondary keywords: distributed naturally across body copy.
+   - Target keyword density ~1–2%. Never at the cost of readability.
+
+3. QUESTION-FORM HEADING STRUCTURE (AEO)
+   - 3–5 H2 headings phrased as natural questions a reader would ask.
+   - Under each, a short (≤60 words) self-contained answer, then
+     optional expanded detail.
+   - Also include an FAQ section of 3–5 additional Q&A pairs near the end.
+
+4. CITATION-WORTHY FACTS (GEO)
+   - Include specific numbers, dates, brand/material names, and
+     measurable claims wherever truthful.
+   - Use declarative sentences ("X costs $Y", "A does B in Z minutes")
+     that LLMs can lift verbatim.
+   - Avoid vague superlatives ("the best", "amazing", "premium") —
+     LLMs downrank vague marketing copy.
+
+5. LOCAL SIGNALS (SEO + GEO)
+   - If a targetLocation is provided, mention the city/region 2–3
+     times naturally (service-area copy, local context, nearby
+     landmarks where relevant). Never force it.
+
+6. META DESCRIPTION
+   - Return a separate field `metaDescription` (150–160 characters)
+     containing the primary keyword and a compelling reason to click.
+
+7. ALT TEXT SUGGESTIONS
+   - For each image referenced in the brief, return an `altTextSuggestions`
+     array with 1–2 descriptive, keyword-aware alt-text strings.
+
+8. WORD COUNT TARGET
+   - Short brief  → 500–700 words
+   - Medium brief → 900–1,200 words
+   - Long brief   → 1,400–1,800 words
+
+Return JSON matching this shape:
+{
+  "title":                "...",
+  "metaDescription":      "...",
+  "content":              "<post body as HTML>",
+  "altTextSuggestions":   ["...", "..."],
+  "seoNotes":             "<1–2 sentences on SEO choices made>"
+}
+```
+
+**What the operator sees in the UI post-generate:**
+
+- The generated post body (editable as today).
+- A **Meta description** field (copyable, highlighted if over 160 chars).
+- An **Alt text** list, one suggestion per image.
+- An **SEO notes** line explaining Claude's choices (useful for the reviewer and for training the operator over time).
+
+**What gets sent to WordPress on publish:**
+
+- `title`, `content` → standard WP fields (unchanged from today).
+- `excerpt` ← `metaDescription` (WordPress uses `excerpt` for Yoast/RankMath meta in most setups; if a client uses a different SEO plugin, this is one extra setting to configure).
+- Alt text is left as operator-paste for now (WP's media library is per-image; automating alt-text injection across uploaded media is Phase 2).
+
+**Why this is a client-side prompt change, not a server change:** the prompt lives in `app.js` (per DESIGN-DOC.md's current architecture) and is sent as the `messages[0].content` payload. `generate.js` doesn't need to know about SEO at all — it's pass-through to Anthropic. The prompt addition is purely additive; single-post flow can opt in to the same optimization by reading the same `primaryKeyword` field, which Phase 2 will add to the single-post brief form as well.
+
+**What this is NOT doing:**
+
+- Not running a separate "SEO audit" pass after generate. Every post is optimized in one pass; no second API call.
+- Not scoring posts against a checklist in the UI. If Claude misses a rule, the operator catches it in review — cheaper than building a linter.
+- Not generating schema.org JSON-LD markup. Phase 2 candidate; most WP SEO plugins handle FAQ / Article schema automatically.
+- Not stuffing keywords for ranking tricks. Natural prose is non-negotiable.
 
 ## UI structure (new tab + new components)
 
@@ -88,10 +198,18 @@ Status pill reuses the existing `.pill-*` variants plus one new class:
             | "publishing" | "published" | "error",
       brief: {
         title: "", audience: "", angle: "",
-        key: "", must: "", cta: "", length: "medium"
+        key: "", must: "", cta: "", length: "medium",
+        primaryKeyword: "", secondaryKeywords: "",
+        targetLocation: ""  // auto-filled from client profile if available
       },
       // populated after generate:
-      generated: { title: "...", content: "<p>...</p>" } | null,
+      generated: {
+        title:              "...",
+        content:            "<p>...</p>",
+        metaDescription:    "...",           // 150–160 chars, for Yoast/RankMath
+        altTextSuggestions: ["...", "..."],  // operator pastes into WP media library
+        seoNotes:           "..."            // Claude's explanation of SEO choices
+      } | null,
       // populated after publish:
       wpPostId: 1234 | null,
       wpPostUrl: "https://..." | null,
@@ -143,11 +261,12 @@ state.batch = {
 3. Operator reviews, optionally expands and edits rows.
    Every edit re-persists the row. Status stays 'generated'.
 
-4. Click "Send all to WordPress as Pending Review"
+4. Operator picks **Draft** or **Pending Review** at the top of the tab, clicks "Send all to WordPress"
    a. Guard: at least one row with status == 'generated'.
-   b. For each generated row (bounded concurrency 3):
+   b. Guard: `publish` is NEVER an allowed batch status — the dropdown only offers `draft` and `pending`. Batch cannot push content live by mistake.
+   c. For each generated row (bounded concurrency 3):
         - status → 'publishing', persist
-        - Build WP body: { title, content: sanitizeHtml(content), status: 'pending' }
+        - Build WP body: { title, content: sanitizeHtml(content), status: <draft|pending> }
         - apiCall('batch-publish', active.url + '/wp-json/wp/v2/posts', {...})
         - On success: row.wpPostId, row.wpPostUrl set, status = 'published'
         - On failure: row.lastError, status = 'error'
@@ -207,12 +326,22 @@ Per CLAUDE.md:
 
 ## Rollout phases
 
-### Phase 1 — MVP (target: 3–4 days of work)
+### Phase 0 — Same-day MVP (today)
 
-- New Batch tab, up to 15 rows, single active client, Generate All + Publish All (Pending only)
-- Bounded concurrency (3), in-flight progress bar, per-row error + retry
-- Persist batch queue to localStorage, resume-safe on reload
-- Existing diagnostics pipeline
+- New Batch tab, up to 15 rows, single active client.
+- Per-row brief form including the new **Primary keyword** field.
+- **Generate All** runs sequentially (not parallel) — simpler, ships today.
+- SEO/GEO/AEO prompt additions active by default (no toggle).
+- **Send All** with a Draft-or-Pending dropdown — Publish is never offered.
+- Brief queue auto-saves to localStorage so a reload doesn't lose brief input.
+- Errors surface via the existing `diagnoseError` + banner pipeline; no per-row retry polish yet.
+
+### Phase 1 — Hardening (target: 3–4 days after MVP)
+
+- Bounded concurrency (3), in-flight progress bar, per-row retry button.
+- Resume-safe on reload (generated content persists, stuck rows flip to error).
+- Cost preview before Generate All.
+- Existing diagnostics pipeline extended with batch contexts.
 
 ### Phase 2 — Quality of life (target: +1 week)
 
@@ -237,7 +366,8 @@ Per CLAUDE.md:
 ## What v1 explicitly is NOT
 
 - **Not cross-client.** One batch = one client. Cross-client is Phase 3.
-- **Not a scheduled publisher.** The batch goes out as Pending Review, all at once. The client approves on WordPress (which can itself schedule publication). Staggered scheduling from our app is Phase 3.
+- **Not a scheduled publisher.** The batch goes out as Draft or Pending Review, all at once. The client (or operator) approves on WordPress, which can then schedule publication. Staggered scheduling from our app is Phase 3.
+- **Never auto-Publishes.** Batch can never push a post live — Publish status is intentionally excluded from the batch status dropdown. Going live stays a single-post, deliberate action.
 - **Not a brief library.** Brief templates are Phase 2; v1 is freehand-only.
 - **Not a cost-optimizer.** No auto-switch to cheaper models for low-risk briefs. The operator picks the model; we just show the estimate.
 - **Not a review workflow.** Review happens in WordPress, same as single-post. We are not replicating comment threads, approvals, or status transitions in our UI.
@@ -249,7 +379,7 @@ Per CLAUDE.md:
 3. **Fill row 1 fully, row 2 fully, row 3 partially.** *(60s)* Rows 1 and 2 flip to `ready`; row 3 stays `draft`. Point out the per-row status indicator.
 4. **Click Generate All.** *(60–90s)* Progress bar appears. Watch pills flip `ready → generating → generated`. Row 3 skipped (still `draft`). Announce the final summary: "2 generated, 0 failed."
 5. **Click a generated row to expand.** *(30s)* Show the editable title and content. Make a small edit. Point out the auto-save.
-6. **Click Send all to WordPress as Pending Review.** *(30s)* Pills flip `generated → publishing → published`. Final banner: "2 sent for client review."
+6. **Pick Pending Review from the status dropdown and click Send all.** *(30s)* Pills flip `generated → publishing → sent`. Final banner: "2 sent for client review." (Point out the dropdown offers only Draft or Pending — Publish is not an option here.)
 7. **Open the client's WordPress admin in a side tab.** *(30s)* Point to Posts → Pending: the two new drafts are there, ready for the client to approve.
 8. **Reload the page.** *(15s)* Batch tab is preserved — rows and their statuses persist. This is the resumability story.
 9. **Demo an error.** *(45s)* Break an Application Password temporarily, click Retry on a row, show the diagnostic banner naming the exact problem, then restore and retry successfully.
