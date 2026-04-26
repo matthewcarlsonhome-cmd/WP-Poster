@@ -4,7 +4,33 @@
 
 ## One-line summary
 
-A static single-page app on Netlify that lets one operator draft blog posts with Claude and publish them to many client WordPress sites, with each client's voice, credentials, and content kept separate.
+A static single-page app on Netlify that lets one operator draft single posts or 15-post batches with Claude and send them to many client WordPress sites, with each client's voice, credentials, and content kept separate.
+
+## Current app state — April 2026
+
+The app now has two creation modes:
+
+1. **Single-post flow.** The original Brief → Draft → WordPress path remains intact. It supports image upload, preview, featured image selection, tags, Draft/Pending/Future/Publish workflows, and activity-log diagnostics.
+2. **Batch flow.** A new Batch tab lets the operator stage up to 15 briefs for the active client, generate SEO/GEO/AEO-ready drafts with bounded concurrency, review/edit each row, and send generated rows to WordPress as **Draft** or **Pending Review** only. Batch intentionally never offers live Publish.
+
+The current production architecture is still no-build static HTML/CSS/JS plus one Netlify Function. No server-side database has been added. Browser storage now contains client profiles, active client ID, preferred Claude model, and the current batch queue. The Anthropic model IDs in the UI and function are the tested IDs for this deployment; do not rename them from pattern-matching alone.
+
+What shipped with Batch:
+
+- Persistent batch queue in `localStorage` under `wp-publisher-batch-queue-v1`
+- One active client per batch, up to 15 rows
+- Per-row fields for title, audience, angle, key message, must-include notes, CTA, length, primary keyword, secondary keywords, and target location
+- Bulk-paste importer for simple line-based, TSV, pipe-delimited, or comma-delimited briefs
+- SEO/GEO/AEO prompt requirements built into every batch generation
+- Generated title, content, meta description, alt text suggestions, and SEO notes
+- Editable generated content before send
+- Bounded concurrency of 3 for generation and WordPress sends
+- Retry/backoff for HTTP 429 and network failures
+- Per-row retry for generation and send failures
+- Cancel button for in-flight batch runs
+- Resume-safe reload behavior: stuck `generating` / `publishing` rows become `error` with `INTERRUPTED`
+- Cost preview based on rough model rates and expected token usage
+- WordPress send body includes `excerpt` from generated `metaDescription`
 
 ## Design goals
 
@@ -27,7 +53,7 @@ A static single-page app on Netlify that lets one operator draft blog posts with
 │    clients             │                     │
 │    active-client       │                     ▼
 │    model               │        ┌──────────────────────────┐
-│                        │        │   api.anthropic.com      │
+│    batch queue         │        │   api.anthropic.com      │
 │                        │        └──────────────────────────┘
 │                        │
 │                        │        ┌──────────────────────────┐
@@ -72,6 +98,53 @@ Just the model ID string. Migration map in `loadStorage()` auto-rewrites stale I
 
 Images uploaded this session are held in `state.images` as `{id, name, url, thumb}`. **Reset on client switch** — images are scoped to the active client's WordPress media library. The `id` and `url` come back from WordPress after upload; the `name` is the original filename (used for in-prompt filename substitution).
 
+### Batch queue (persisted as `wp-publisher-batch-queue-v1`)
+
+```js
+{
+  version: 1,
+  clientId: "c_<client>",
+  model: "claude-sonnet-4-6",
+  rows: [
+    {
+      id: "r_<random>",
+      status: "empty" | "ready" | "generating" | "generated" |
+              "publishing" | "published" | "error",
+      brief: {
+        title: "",
+        audience: "",
+        angle: "",
+        key: "",
+        must: "",
+        cta: "",
+        length: "medium",
+        primaryKeyword: "",
+        secondaryKeywords: "",
+        targetLocation: ""
+      },
+      generated: {
+        title: "",
+        content: "<p>...</p>",
+        metaDescription: "",
+        altTextSuggestions: [],
+        seoNotes: ""
+      } | null,
+      wpPostId: 123 | null,
+      wpPostUrl: "https://..." | null,
+      lastError: {
+        phase: "generate" | "publish",
+        code: "",
+        message: "",
+        ts: 1714000000000
+      } | null
+    }
+  ],
+  updatedAt: 1714000000000
+}
+```
+
+The batch queue does **not** duplicate WordPress Application Passwords. It references the active client by ID and uses the existing client profile when sending to WordPress. Only one saved batch exists per browser in v1. If the operator switches clients while a batch exists for another client, the UI asks them to clear it before starting a new one.
+
 ### Activity log (in-memory only, 200-entry ring buffer)
 
 `appLog = [{ts, level, category, message, detail}]`. Cleared on reload. Re-rendered in the Activity tab on demand. The `detail` field holds full request/response bodies for debugging.
@@ -101,6 +174,42 @@ Images uploaded this session are held in `state.images` as `{id, name, url, thum
    b. apiCall POST → {client}/wp-json/wp/v2/posts
    c. Response link shown in status banner
 ```
+
+## Data flow: "Generate and send a batch"
+
+```
+1. Operator opens Batch tab
+   a. If no batch exists, app creates an empty queue for active client
+   b. If a saved batch exists for another client, app blocks new work until cleared
+
+2. Operator adds rows or bulk-pastes briefs
+   a. Rows persist after every field change
+   b. Rows become "ready" when they have a primary keyword plus a title, angle, or key message
+   c. Cost estimate updates from ready-row count and selected model
+
+3. Click "Generate all"
+   a. Batch snapshots the selected model
+   b. Ready rows move to `generating`
+   c. Up to 3 Claude requests run at once through the existing Netlify Function
+   d. 429/network failures retry with 2s/4s/8s backoff
+   e. Model output is parsed with `parseJsonFromModel()`, sanitized, and persisted row-by-row
+   f. Success rows become `generated`; failures become `error`
+
+4. Operator reviews generated rows
+   a. Title, meta description, content, and SEO notes are editable
+   b. Alt text suggestions are visible for manual use in WordPress media
+   c. Retry buttons rerun generation or send for one row
+
+5. Click "Send all to WordPress"
+   a. Dropdown only allows `pending` or `draft`
+   b. Generated rows move to `publishing`
+   c. Up to 3 WordPress POSTs run at once
+   d. Body includes title, sanitized content, status, and excerpt from meta description
+   e. Success rows store WordPress post ID/link and become `published`
+   f. Failures become `error` and remain retryable
+```
+
+Cancellation uses `AbortController`. Any in-flight rows are restored to `ready` or `generated` and marked with `ABORTED`. On reload, any row stuck in `generating` or `publishing` becomes `error` with `INTERRUPTED` so the operator can verify WordPress before retrying.
 
 ## Error handling architecture
 
@@ -196,6 +305,37 @@ In rough priority order:
 6. **CSP tightening.** Inline style dependencies are eliminated (✅ done — italic/bold buttons moved to classes). Next step: nonce-based `script-src` so even an injected `<script>` can't run.
 7. **Audit trail for publish/delete.** Once Tier 2 is in place, log every publish/delete action with actor + timestamp. Retention 90 days.
 8. **Secret scanning on Export file.** Before download, confirm with a modal: "This file contains credentials for N clients. Continue?"
+
+## Future development path
+
+The practical path from here is to harden the new Batch surface, then move credentials server-side, then add richer content and reporting features.
+
+### Next 1-2 weeks — Batch hardening
+
+1. **Browser QA pass.** Test Batch in Chrome, Edge, and Safari with a real WordPress staging site. Cover reload mid-generate, reload mid-send, cancel, per-row retry, and bad Application Password diagnostics.
+2. **Duplicate detection on retry.** For interrupted publish rows, add a best-effort search against WordPress by slug/title before retrying. Today the UI warns the operator; a lookup would reduce duplicate-post risk.
+3. **Token/cost actuals.** Anthropic responses include usage. Store per-row input/output token counts and replace the current estimate with actual batch cost after generation.
+4. **Configurable concurrency.** Move `BATCH_CONCURRENCY` from a constant to Settings with a conservative default of 3 and a max of 5.
+5. **Batch templates.** Save reusable brief skeletons per client or industry: pool opening, hot tub maintenance, seasonal checklist, service-area FAQ.
+6. **CSV import/export.** The current bulk paste handles simple lines. Add a structured CSV template with headers so an editorial calendar spreadsheet can become a batch with fewer edits.
+
+### Next month — Storage and security
+
+1. **Netlify Identity + server-side client storage.** Move client profiles and Application Passwords out of individual browser storage. Keep localStorage as cache only.
+2. **Audit trail.** Once users authenticate, log generate/send/trash actions with actor, client, post ID, status, and timestamp.
+3. **Credential age tracking.** Add `passUpdatedAt` and warnings for credentials older than 90 days.
+4. **Rate limiting on `generate.js`.** Batch increases quota-burn potential, so add per-session and per-origin limits.
+5. **HTTPS-only client URLs.** Keep `http://` only behind an explicit local-dev bypass.
+
+### Product expansion
+
+1. **Single-post SEO/GEO/AEO fields.** Batch has primary keyword, meta description, SEO notes, and alt text suggestions. Bring those same fields into the single-post Brief/Draft flow.
+2. **Image optimization.** Resize/compress before upload, store image dimensions, and write alt text back to WP media when the operator chooses a suggestion.
+3. **Scheduled batch sends.** Allow rows to be sent as future posts with staggered dates, while keeping batch live Publish disabled by default.
+4. **WordPress plugin adapters.** Support Yoast/RankMath meta fields directly instead of relying on `excerpt` as the generic meta-description carrier.
+5. **Client approval notifications.** Optional email to client when posts are sent to Pending Review.
+6. **Analytics feedback loop.** Pull post performance from GA4 or Search Console and show results beside history/queue items.
+7. **Anthropic Message Batches API.** Revisit when jobs grow beyond 50 posts or cost becomes more important than interactive turnaround.
 
 ## Functionality roadmap
 

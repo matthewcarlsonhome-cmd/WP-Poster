@@ -25,6 +25,7 @@
   <nav class="tabs" role="tablist">
     <button class="tab active" data-tab="brief">1. Brief</button>
     <button class="tab" data-tab="draft">2. Draft</button>
+    <button class="tab" data-tab="batch">Batch</button>
     <button class="tab" data-tab="queue">Queue</button>
     <button class="tab" data-tab="images">Images</button>
     <button class="tab" data-tab="clients">Clients</button>
@@ -172,6 +173,51 @@
         <button class="btn btn-primary btn-wide" id="pub-btn">Send to WordPress</button>
         <div id="pub-status" class="status"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- BATCH -->
+  <section id="tab-batch" class="tab-panel">
+    <div class="card">
+      <div class="batch-header">
+        <div>
+          <div class="lbl section-lbl">Batch posts for <span id="batch-client-name">current client</span></div>
+          <p class="small-note">Stage up to 15 briefs, generate SEO/GEO/AEO-ready drafts, then send them as Draft or Pending Review only.</p>
+        </div>
+        <div class="batch-counts">
+          <span id="batch-row-count">0 / 15</span>
+          <span id="batch-cost-estimate">Est. cost: $0.00</span>
+        </div>
+      </div>
+
+      <div id="batch-client-warning" class="status warning"></div>
+
+      <div class="batch-controls">
+        <button class="btn btn-primary btn-sm" id="batch-add-row-btn">+ Add brief</button>
+        <button class="btn btn-sm" id="batch-bulk-toggle-btn">Bulk paste</button>
+        <button class="btn btn-sm" id="batch-clear-btn">Clear batch</button>
+        <button class="btn btn-primary btn-sm" id="batch-generate-btn">Generate all</button>
+        <button class="btn btn-sm hidden" id="batch-cancel-btn">Cancel</button>
+        <select id="batch-publish-status" class="batch-status-select" aria-label="Batch publish status">
+          <option value="pending" selected>Pending review</option>
+          <option value="draft">Draft</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="batch-send-btn">Send all to WordPress</button>
+      </div>
+
+      <div id="batch-bulk-panel" class="batch-bulk-panel hidden">
+        <label class="lbl" for="batch-bulk-input">Paste briefs</label>
+        <textarea id="batch-bulk-input" rows="5" placeholder="One post per line. Use tabs, pipes, or commas: title | primary keyword | angle | key message | CTA"></textarea>
+        <button class="btn btn-sm" id="batch-bulk-add-btn">Add pasted briefs</button>
+      </div>
+
+      <div class="batch-progress hidden" id="batch-progress">
+        <div class="batch-progress-track"><div id="batch-progress-fill" class="batch-progress-fill"></div></div>
+        <div id="batch-progress-label" class="batch-progress-label">0 / 0</div>
+      </div>
+
+      <div id="batch-status" class="status"></div>
+      <div id="batch-list" class="batch-list"></div>
     </div>
   </section>
 

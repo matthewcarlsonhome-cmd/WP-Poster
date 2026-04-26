@@ -88,7 +88,10 @@ const state = {
   view: 'html',
   currentBrief: null,
   model: 'claude-sonnet-4-6',
-  editingClientId: null
+  editingClientId: null,
+  batchQueue: null,
+  batchOpenRows: new Set(),
+  batchRun: { running: false, phase: null, abortController: null }
 };
 
 // localStorage keys. Centralized so migrations and cleanup have a single
@@ -96,8 +99,14 @@ const state = {
 const STORAGE_KEYS = {
   clients: 'wp-publisher-clients',
   active:  'wp-publisher-active-client',
-  model:   'wp-publisher-model'
+  model:   'wp-publisher-model',
+  batch:   'wp-publisher-batch-queue-v1'
 };
+
+const BATCH_MAX_ROWS = 15;
+const BATCH_CONCURRENCY = 3;
+const BATCH_AUTOSAVE_MS = 400;
+let batchAutosaveTimer = null;
 
 // The one endpoint in our own backend. Everything else is a WordPress
 // REST URL under the active client's site.
@@ -692,6 +701,13 @@ function loadStorage() {
     }
   } catch (e) {}
 
+  try {
+    const b = localStorage.getItem(STORAGE_KEYS.batch);
+    if (b) state.batchQueue = normalizeBatchQueue(JSON.parse(b));
+  } catch (e) {
+    state.batchQueue = null;
+  }
+
   // If the saved active-client ID points to a client that no longer exists,
   // fall back to the first client or none.
   if (state.activeClientId && !getActiveClient()) {
@@ -704,6 +720,8 @@ function loadStorage() {
   renderClientSelector();
   renderClientList();
   updateActiveClientUI();
+  recoverInterruptedBatchRows();
+  renderBatch();
 }
 
 function persistClients() {
@@ -783,12 +801,15 @@ function updateActiveClientUI() {
 
   const qn = document.getElementById('queue-client-name');
   const inn = document.getElementById('images-client-name');
+  const bn = document.getElementById('batch-client-name');
   if (active) {
     if (qn) qn.textContent = active.name;
     if (inn) inn.textContent = active.name;
+    if (bn) bn.textContent = active.name;
   } else {
     if (qn) qn.textContent = '—';
     if (inn) inn.textContent = '—';
+    if (bn) bn.textContent = '—';
   }
 
   // Session images scoped to active client — reset on switch
@@ -796,6 +817,7 @@ function updateActiveClientUI() {
   renderImages();
   updateFeaturedSelect();
   updateBriefImgList();
+  renderBatch();
 }
 
 function setActiveClient(id) {
@@ -815,6 +837,7 @@ function switchTab(name) {
     t.classList.toggle('active', t.dataset.tab === name);
   });
   if (name === 'queue') loadQueue();
+  if (name === 'batch') renderBatch();
   if (name === 'brief') updateBriefImgList();
   if (name === 'history') loadHistory();
   if (name === 'clients') renderClientList();
@@ -1847,7 +1870,896 @@ async function deletePost(postId, rowElement, title) {
   }
 }
 
-/* ---------- 14. history (all clients) ---------- */
+/* ---------- 14. batch ---------- */
+
+function emptyBatchQueue(clientId) {
+  return {
+    version: 1,
+    clientId: clientId || null,
+    model: state.model,
+    rows: [],
+    updatedAt: Date.now()
+  };
+}
+
+function emptyBatchBrief() {
+  return {
+    title: '',
+    audience: '',
+    angle: '',
+    key: '',
+    must: '',
+    cta: '',
+    length: 'medium',
+    primaryKeyword: '',
+    secondaryKeywords: '',
+    targetLocation: ''
+  };
+}
+
+function normalizeBatchQueue(q) {
+  if (!q || typeof q !== 'object' || !Array.isArray(q.rows)) return null;
+  const clean = {
+    version: 1,
+    clientId: q.clientId || null,
+    model: q.model || state.model,
+    rows: [],
+    updatedAt: q.updatedAt || Date.now()
+  };
+  q.rows.slice(0, BATCH_MAX_ROWS).forEach(function (row) {
+    const brief = Object.assign(emptyBatchBrief(), row.brief || {});
+    clean.rows.push({
+      id: row.id || generateBatchRowId(),
+      status: row.status || 'empty',
+      brief: brief,
+      generated: row.generated ? {
+        title: row.generated.title || '',
+        content: row.generated.content || '',
+        metaDescription: row.generated.metaDescription || '',
+        altTextSuggestions: Array.isArray(row.generated.altTextSuggestions) ? row.generated.altTextSuggestions : [],
+        seoNotes: row.generated.seoNotes || ''
+      } : null,
+      wpPostId: row.wpPostId || null,
+      wpPostUrl: row.wpPostUrl || null,
+      lastError: row.lastError || null
+    });
+  });
+  return clean;
+}
+
+function recoverInterruptedBatchRows() {
+  if (!state.batchQueue) return;
+  let changed = false;
+  state.batchQueue.rows.forEach(function (row) {
+    if (row.status === 'generating' || row.status === 'publishing') {
+      const interruptedPhase = row.status === 'generating' ? 'generate' : 'publish';
+      row.status = 'error';
+      row.lastError = {
+        phase: interruptedPhase,
+        code: 'INTERRUPTED',
+        message: 'The browser closed or reloaded while this row was in flight. Verify in WordPress before retrying a publish.',
+        ts: Date.now()
+      };
+      changed = true;
+    }
+  });
+  if (changed) persistBatchQueue();
+}
+
+function persistBatchQueue() {
+  if (!state.batchQueue) {
+    localStorage.removeItem(STORAGE_KEYS.batch);
+    return;
+  }
+  state.batchQueue.updatedAt = Date.now();
+  localStorage.setItem(STORAGE_KEYS.batch, JSON.stringify(state.batchQueue));
+}
+
+function ensureBatchQueueForActiveClient() {
+  const active = getActiveClient();
+  if (!active) return null;
+  if (!state.batchQueue) {
+    state.batchQueue = emptyBatchQueue(active.id);
+    persistBatchQueue();
+  }
+  return state.batchQueue;
+}
+
+function generateBatchRowId() {
+  return 'r_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now().toString(36);
+}
+
+function createBatchRow(seed) {
+  const active = getActiveClient();
+  const brief = Object.assign(emptyBatchBrief(), seed || {});
+  if (!brief.targetLocation && active && active.location) brief.targetLocation = active.location;
+  return {
+    id: generateBatchRowId(),
+    status: 'empty',
+    brief: brief,
+    generated: null,
+    wpPostId: null,
+    wpPostUrl: null,
+    lastError: null
+  };
+}
+
+function isBatchBriefReady(row) {
+  const b = row.brief || {};
+  return !!(b.primaryKeyword && (b.angle || b.key || b.title));
+}
+
+function syncBatchRowStatus(row) {
+  if (row.status === 'generating' || row.status === 'publishing' || row.status === 'published') return;
+  if (row.generated && row.generated.title && row.generated.content) {
+    row.status = 'generated';
+  } else {
+    row.status = isBatchBriefReady(row) ? 'ready' : 'empty';
+  }
+}
+
+function batchStatusMeta(status) {
+  const map = {
+    empty:      { label: 'Draft', cls: 'pill-draft' },
+    ready:      { label: 'Ready', cls: 'pill-pending' },
+    generating: { label: 'Generating', cls: 'pill-generating' },
+    generated:  { label: 'Generated', cls: 'pill-scheduled' },
+    publishing: { label: 'Publishing', cls: 'pill-generating' },
+    published:  { label: 'Sent', cls: 'pill-published' },
+    error:      { label: 'Error', cls: 'pill-error' }
+  };
+  return map[status] || map.empty;
+}
+
+function estimateBatchCost(rows) {
+  const model = state.batchRun.running && state.batchQueue ? state.batchQueue.model : state.model;
+  const count = rows.filter(function (r) { return isBatchBriefReady(r); }).length;
+  const rates = {
+    'claude-haiku-4-5-20251001': { input: 1, output: 5 },
+    'claude-sonnet-4-6': { input: 3, output: 15 },
+    'claude-opus-4-7': { input: 5, output: 25 }
+  };
+  const rate = rates[model] || rates['claude-sonnet-4-6'];
+  const inputTokens = 2500;
+  const outputTokens = 1800;
+  return count * ((inputTokens / 1000000) * rate.input + (outputTokens / 1000000) * rate.output);
+}
+
+function renderBatch() {
+  const list = document.getElementById('batch-list');
+  if (!list) return;
+  const active = getActiveClient();
+  const queue = state.batchQueue;
+  const warning = document.getElementById('batch-client-warning');
+  const countEl = document.getElementById('batch-row-count');
+  const costEl = document.getElementById('batch-cost-estimate');
+  const addBtn = document.getElementById('batch-add-row-btn');
+  const genBtn = document.getElementById('batch-generate-btn');
+  const sendBtn = document.getElementById('batch-send-btn');
+  const cancelBtn = document.getElementById('batch-cancel-btn');
+
+  list.innerHTML = '';
+  if (warning) showStatus('batch-client-warning', '', '');
+
+  const rows = queue ? queue.rows : [];
+  if (countEl) countEl.textContent = rows.length + ' / ' + BATCH_MAX_ROWS;
+  if (costEl) costEl.textContent = 'Est. cost: $' + estimateBatchCost(rows).toFixed(2);
+
+  const mismatched = !!(active && queue && queue.clientId && queue.clientId !== active.id);
+  if (!active) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'Select or add a client before creating a batch.';
+    list.appendChild(empty);
+  } else if (mismatched) {
+    const owner = state.clients.find(function (c) { return c.id === queue.clientId; });
+    showStatus('batch-client-warning',
+      'This saved batch belongs to ' + escapeText(owner ? owner.name : 'another client') + '. Clear it to start a new batch for ' + escapeText(active.name) + '.',
+      'warning');
+  } else if (!queue || rows.length === 0) {
+    const emptyRow = document.createElement('div');
+    emptyRow.className = 'empty-state';
+    emptyRow.textContent = 'No batch briefs yet. Add a row or bulk paste a monthly content plan.';
+    list.appendChild(emptyRow);
+  } else {
+    rows.forEach(function (row, idx) {
+      syncBatchRowStatus(row);
+      list.appendChild(renderBatchRow(row, idx));
+    });
+  }
+
+  if (addBtn) addBtn.disabled = !active || mismatched || rows.length >= BATCH_MAX_ROWS || state.batchRun.running;
+  if (genBtn) genBtn.disabled = !active || mismatched || rows.length === 0 || state.batchRun.running;
+  if (sendBtn) sendBtn.disabled = !active || mismatched || rows.filter(function (r) { return r.status === 'generated'; }).length === 0 || state.batchRun.running;
+  if (cancelBtn) cancelBtn.classList.toggle('hidden', !state.batchRun.running);
+  renderBatchProgress();
+}
+
+function renderBatchRow(row, idx) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'batch-row';
+  if (!isBatchBriefReady(row)) wrapper.classList.add('incomplete');
+  wrapper.dataset.rowId = row.id;
+
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'batch-row-head';
+  head.dataset.action = 'toggle';
+  head.dataset.rowId = row.id;
+
+  const num = document.createElement('div');
+  num.className = 'batch-row-num';
+  num.textContent = '#' + (idx + 1);
+
+  const title = document.createElement('div');
+  title.className = 'batch-row-title';
+  const main = document.createElement('div');
+  main.className = 'batch-row-title-main';
+  main.textContent = (row.generated && row.generated.title) || row.brief.title || row.brief.angle || '(untitled brief)';
+  const sub = document.createElement('div');
+  sub.className = 'batch-row-title-sub';
+  sub.textContent = row.brief.primaryKeyword ? row.brief.primaryKeyword : 'Primary keyword required';
+  title.appendChild(main);
+  title.appendChild(sub);
+
+  const meta = batchStatusMeta(row.status);
+  const pill = document.createElement('span');
+  pill.className = 'pill ' + meta.cls;
+  pill.textContent = meta.label;
+
+  head.appendChild(num);
+  head.appendChild(title);
+  head.appendChild(pill);
+  wrapper.appendChild(head);
+
+  if (state.batchOpenRows.has(row.id)) {
+    const body = document.createElement('div');
+    body.className = 'batch-row-body';
+    appendBatchBriefFields(body, row);
+    if (row.generated) appendBatchGeneratedFields(body, row);
+    if (row.lastError) {
+      const err = document.createElement('div');
+      err.className = 'batch-row-error';
+      err.textContent = row.lastError.phase + ' · ' + (row.lastError.code || 'ERROR') + ' · ' + row.lastError.message;
+      body.appendChild(err);
+    }
+    appendBatchActions(body, row, idx);
+    wrapper.appendChild(body);
+  }
+  return wrapper;
+}
+
+function appendBatchBriefFields(parent, row) {
+  const fields = [
+    ['title', 'Working title', 'text'],
+    ['audience', 'Audience', 'text'],
+    ['primaryKeyword', 'Primary keyword', 'text'],
+    ['secondaryKeywords', 'Secondary keywords', 'text'],
+    ['targetLocation', 'Target location', 'text'],
+    ['angle', 'Angle', 'textarea'],
+    ['key', 'Key message', 'textarea'],
+    ['must', 'Must include', 'textarea'],
+    ['cta', 'Call to action', 'text']
+  ];
+  fields.forEach(function (f) {
+    const wrap = document.createElement('div');
+    wrap.className = 'brief-row';
+    const label = document.createElement('label');
+    label.textContent = f[1];
+    const input = f[2] === 'textarea' ? document.createElement('textarea') : document.createElement('input');
+    if (f[2] !== 'textarea') input.type = 'text';
+    else input.rows = 2;
+    input.value = row.brief[f[0]] || '';
+    input.dataset.rowId = row.id;
+    input.dataset.field = f[0];
+    input.dataset.scope = 'brief';
+    wrap.appendChild(label);
+    wrap.appendChild(input);
+    parent.appendChild(wrap);
+  });
+
+  const lengthWrap = document.createElement('div');
+  lengthWrap.className = 'brief-row';
+  const lengthLabel = document.createElement('label');
+  lengthLabel.textContent = 'Length';
+  const lengthSelect = document.createElement('select');
+  lengthSelect.dataset.rowId = row.id;
+  lengthSelect.dataset.field = 'length';
+  lengthSelect.dataset.scope = 'brief';
+  [
+    ['short', 'Short (500-700 words)'],
+    ['medium', 'Medium (900-1,200 words)'],
+    ['long', 'Long (1,400-1,800 words)']
+  ].forEach(function (optDef) {
+    const opt = document.createElement('option');
+    opt.value = optDef[0];
+    opt.textContent = optDef[1];
+    if ((row.brief.length || 'medium') === opt.value) opt.selected = true;
+    lengthSelect.appendChild(opt);
+  });
+  lengthWrap.appendChild(lengthLabel);
+  lengthWrap.appendChild(lengthSelect);
+  parent.appendChild(lengthWrap);
+}
+
+function appendBatchGeneratedFields(parent, row) {
+  const generated = row.generated;
+  const group = document.createElement('div');
+  group.className = 'batch-generated-grid';
+
+  const titleField = document.createElement('div');
+  titleField.className = 'field';
+  const titleLabel = document.createElement('label');
+  titleLabel.className = 'lbl';
+  titleLabel.textContent = 'Generated title';
+  const titleInput = document.createElement('input');
+  titleInput.type = 'text';
+  titleInput.value = generated.title || '';
+  titleInput.dataset.rowId = row.id;
+  titleInput.dataset.scope = 'generated';
+  titleInput.dataset.field = 'title';
+  titleField.appendChild(titleLabel);
+  titleField.appendChild(titleInput);
+  group.appendChild(titleField);
+
+  const metaField = document.createElement('div');
+  metaField.className = 'field';
+  const metaLabel = document.createElement('label');
+  metaLabel.className = 'lbl';
+  metaLabel.textContent = 'Meta description';
+  const metaInput = document.createElement('textarea');
+  metaInput.rows = 2;
+  metaInput.value = generated.metaDescription || '';
+  metaInput.dataset.rowId = row.id;
+  metaInput.dataset.scope = 'generated';
+  metaInput.dataset.field = 'metaDescription';
+  const metaCount = document.createElement('div');
+  metaCount.className = 'batch-meta-count' + ((generated.metaDescription || '').length > 160 ? ' over' : '');
+  metaCount.textContent = (generated.metaDescription || '').length + ' / 160';
+  metaField.appendChild(metaLabel);
+  metaField.appendChild(metaInput);
+  metaField.appendChild(metaCount);
+  group.appendChild(metaField);
+
+  const contentField = document.createElement('div');
+  contentField.className = 'field';
+  const contentLabel = document.createElement('label');
+  contentLabel.className = 'lbl';
+  contentLabel.textContent = 'Content';
+  const contentInput = document.createElement('textarea');
+  contentInput.className = 'batch-content-textarea';
+  contentInput.value = generated.content || '';
+  contentInput.dataset.rowId = row.id;
+  contentInput.dataset.scope = 'generated';
+  contentInput.dataset.field = 'content';
+  contentField.appendChild(contentLabel);
+  contentField.appendChild(contentInput);
+  group.appendChild(contentField);
+
+  const seoField = document.createElement('div');
+  seoField.className = 'field';
+  const seoLabel = document.createElement('label');
+  seoLabel.className = 'lbl';
+  seoLabel.textContent = 'SEO notes';
+  const seoInput = document.createElement('textarea');
+  seoInput.rows = 2;
+  seoInput.value = generated.seoNotes || '';
+  seoInput.dataset.rowId = row.id;
+  seoInput.dataset.scope = 'generated';
+  seoInput.dataset.field = 'seoNotes';
+  seoField.appendChild(seoLabel);
+  seoField.appendChild(seoInput);
+  group.appendChild(seoField);
+
+  const alt = document.createElement('div');
+  alt.className = 'batch-alt-list';
+  const altTitle = document.createElement('div');
+  altTitle.className = 'lbl';
+  altTitle.textContent = 'Alt text suggestions';
+  alt.appendChild(altTitle);
+  if (generated.altTextSuggestions && generated.altTextSuggestions.length) {
+    const ul = document.createElement('ul');
+    generated.altTextSuggestions.forEach(function (suggestion) {
+      const li = document.createElement('li');
+      li.textContent = suggestion;
+      ul.appendChild(li);
+    });
+    alt.appendChild(ul);
+  } else {
+    const none = document.createElement('div');
+    none.textContent = 'No alt text suggestions returned.';
+    alt.appendChild(none);
+  }
+  group.appendChild(alt);
+
+  parent.appendChild(group);
+}
+
+function appendBatchActions(parent, row, idx) {
+  const actions = document.createElement('div');
+  actions.className = 'batch-actions';
+  [
+    ['duplicate', 'Duplicate', 'btn btn-sm'],
+    ['up', 'Move up', 'btn btn-sm'],
+    ['down', 'Move down', 'btn btn-sm'],
+    ['retry-generate', 'Retry generate', 'btn btn-sm'],
+    ['retry-publish', 'Retry send', 'btn btn-sm'],
+    ['remove', 'Remove', 'btn btn-sm btn-danger']
+  ].forEach(function (def) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = def[2];
+    btn.textContent = def[1];
+    btn.dataset.action = def[0];
+    btn.dataset.rowId = row.id;
+    if (def[0] === 'up') btn.disabled = idx === 0 || state.batchRun.running;
+    if (def[0] === 'down') btn.disabled = !state.batchQueue || idx === state.batchQueue.rows.length - 1 || state.batchRun.running;
+    if (def[0] === 'retry-generate') btn.disabled = state.batchRun.running || !isBatchBriefReady(row);
+    if (def[0] === 'retry-publish') btn.disabled = state.batchRun.running || !row.generated || row.status === 'published';
+    if (def[0] === 'remove' || def[0] === 'duplicate') btn.disabled = state.batchRun.running;
+    actions.appendChild(btn);
+  });
+  parent.appendChild(actions);
+}
+
+function addBatchRow(seed) {
+  const queue = ensureBatchQueueForActiveClient();
+  if (!queue) return showStatus('batch-status', 'Select a client first.', 'error');
+  const active = getActiveClient();
+  if (queue.clientId && active && queue.clientId !== active.id) {
+    return showStatus('batch-status', 'Clear the existing batch before starting one for this client.', 'error');
+  }
+  if (queue.rows.length >= BATCH_MAX_ROWS) {
+    return showStatus('batch-status', 'Batch limit is ' + BATCH_MAX_ROWS + ' rows.', 'warning');
+  }
+  const row = createBatchRow(seed);
+  syncBatchRowStatus(row);
+  queue.rows.push(row);
+  state.batchOpenRows.add(row.id);
+  persistBatchQueue();
+  renderBatch();
+}
+
+function clearBatchQueue() {
+  if (state.batchRun.running) return;
+  if (state.batchQueue && state.batchQueue.rows.length > 0 &&
+      !confirm('Clear this batch from this browser? Generated content and send results in the batch will be removed.')) {
+    return;
+  }
+  const active = getActiveClient();
+  state.batchQueue = active ? emptyBatchQueue(active.id) : null;
+  state.batchOpenRows.clear();
+  persistBatchQueue();
+  renderBatch();
+  showStatus('batch-status', 'Batch cleared.', 'success');
+}
+
+function getBatchRow(rowId) {
+  if (!state.batchQueue) return null;
+  return state.batchQueue.rows.find(function (r) { return r.id === rowId; }) || null;
+}
+
+function handleBatchInput(e) {
+  const target = e.target;
+  if (!target || !target.dataset || !target.dataset.rowId) return;
+  const row = getBatchRow(target.dataset.rowId);
+  if (!row) return;
+  const scope = target.dataset.scope;
+  const field = target.dataset.field;
+  if (scope === 'brief') {
+    row.brief[field] = target.value;
+    if (row.status !== 'published') syncBatchRowStatus(row);
+  } else if (scope === 'generated' && row.generated) {
+    row.generated[field] = target.value;
+    if (field === 'content') row.generated.content = sanitizeHtml(row.generated.content);
+    if (row.status !== 'published') row.status = 'generated';
+  }
+  row.lastError = null;
+  persistBatchQueue();
+  renderBatch();
+}
+
+function handleBatchTyping(e) {
+  const target = e.target;
+  if (!target || !target.dataset || !target.dataset.rowId) return;
+  const row = getBatchRow(target.dataset.rowId);
+  if (!row) return;
+  const scope = target.dataset.scope;
+  const field = target.dataset.field;
+  if (scope === 'brief') {
+    row.brief[field] = target.value;
+    if (row.status !== 'published') syncBatchRowStatus(row);
+  } else if (scope === 'generated' && row.generated) {
+    row.generated[field] = field === 'content' ? sanitizeHtml(target.value) : target.value;
+    if (row.status !== 'published') row.status = 'generated';
+  }
+  row.lastError = null;
+  clearTimeout(batchAutosaveTimer);
+  batchAutosaveTimer = setTimeout(function () {
+    persistBatchQueue();
+    const countEl = document.getElementById('batch-row-count');
+    const costEl = document.getElementById('batch-cost-estimate');
+    const rows = state.batchQueue ? state.batchQueue.rows : [];
+    if (countEl) countEl.textContent = rows.length + ' / ' + BATCH_MAX_ROWS;
+    if (costEl) costEl.textContent = 'Est. cost: $' + estimateBatchCost(rows).toFixed(2);
+  }, BATCH_AUTOSAVE_MS);
+}
+
+function handleBatchClick(e) {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const action = btn.dataset.action;
+  const rowId = btn.dataset.rowId;
+  if (action === 'toggle') {
+    if (state.batchOpenRows.has(rowId)) state.batchOpenRows.delete(rowId);
+    else state.batchOpenRows.add(rowId);
+    renderBatch();
+    return;
+  }
+  const queue = state.batchQueue;
+  const row = getBatchRow(rowId);
+  if (!queue || !row) return;
+  const idx = queue.rows.findIndex(function (r) { return r.id === rowId; });
+  if (action === 'remove') {
+    queue.rows.splice(idx, 1);
+    state.batchOpenRows.delete(rowId);
+    persistBatchQueue();
+    renderBatch();
+  } else if (action === 'duplicate') {
+    if (queue.rows.length >= BATCH_MAX_ROWS) return showStatus('batch-status', 'Batch limit is ' + BATCH_MAX_ROWS + ' rows.', 'warning');
+    const copy = createBatchRow(Object.assign({}, row.brief));
+    if (row.generated) copy.generated = Object.assign({}, row.generated, { altTextSuggestions: row.generated.altTextSuggestions.slice() });
+    syncBatchRowStatus(copy);
+    queue.rows.splice(idx + 1, 0, copy);
+    state.batchOpenRows.add(copy.id);
+    persistBatchQueue();
+    renderBatch();
+  } else if (action === 'up' && idx > 0) {
+    queue.rows.splice(idx - 1, 0, queue.rows.splice(idx, 1)[0]);
+    persistBatchQueue();
+    renderBatch();
+  } else if (action === 'down' && idx < queue.rows.length - 1) {
+    queue.rows.splice(idx + 1, 0, queue.rows.splice(idx, 1)[0]);
+    persistBatchQueue();
+    renderBatch();
+  } else if (action === 'retry-generate') {
+    runBatchGenerate([row]);
+  } else if (action === 'retry-publish') {
+    runBatchPublish([row]);
+  }
+}
+
+function parseBatchBulkLine(line) {
+  const parts = line.indexOf('\t') !== -1 ? line.split('\t') :
+    (line.indexOf('|') !== -1 ? line.split('|') : line.split(','));
+  const cleaned = parts.map(function (p) { return p.trim(); });
+  if (cleaned.length <= 1) return { title: cleaned[0] || '', angle: cleaned[0] || '' };
+  return {
+    title: cleaned[0] || '',
+    primaryKeyword: cleaned[1] || '',
+    angle: cleaned[2] || '',
+    key: cleaned[3] || '',
+    cta: cleaned[4] || ''
+  };
+}
+
+function addBulkBatchRows() {
+  const input = document.getElementById('batch-bulk-input');
+  if (!input) return;
+  const lines = input.value.split(/\r?\n/).map(function (l) { return l.trim(); }).filter(Boolean);
+  if (lines.length === 0) return showStatus('batch-status', 'Paste at least one brief line.', 'warning');
+  const queue = ensureBatchQueueForActiveClient();
+  if (!queue) return;
+  let added = 0;
+  lines.forEach(function (line) {
+    if (queue.rows.length >= BATCH_MAX_ROWS) return;
+    const row = createBatchRow(parseBatchBulkLine(line));
+    syncBatchRowStatus(row);
+    queue.rows.push(row);
+    state.batchOpenRows.add(row.id);
+    added++;
+  });
+  input.value = '';
+  persistBatchQueue();
+  renderBatch();
+  showStatus('batch-status', 'Added ' + added + ' brief' + (added === 1 ? '' : 's') + '.', 'success');
+}
+
+function buildBatchPrompt(active, row) {
+  const b = row.brief;
+  const wc = { short: '500-700', medium: '900-1,200', long: '1,400-1,800' }[b.length || 'medium'];
+  let prompt = 'You are writing a blog post for ' + active.name + '. Follow their voice guide strictly.\n\n';
+  if (active.voice)  prompt += 'VOICE GUIDE:\n' + active.voice + '\n\n';
+  if (active.sample) prompt += 'SAMPLE PARAGRAPH (match this rhythm and tone):\n' + active.sample + '\n\n';
+  prompt += 'BRIEF:\n';
+  if (b.title) prompt += '- Working title: ' + b.title + '\n';
+  if (b.audience) prompt += '- Audience: ' + b.audience + '\n';
+  if (b.angle) prompt += '- Angle: ' + b.angle + '\n';
+  if (b.key) prompt += '- Key message: ' + b.key + '\n';
+  if (b.must) prompt += '- Must include: ' + b.must + '\n';
+  if (b.cta) prompt += '- Call to action: ' + b.cta + '\n';
+  prompt += '- Primary keyword: ' + b.primaryKeyword + '\n';
+  if (b.secondaryKeywords) prompt += '- Secondary keywords: ' + b.secondaryKeywords + '\n';
+  if (b.targetLocation) prompt += '- Target location: ' + b.targetLocation + '\n';
+  prompt += '- Length: approximately ' + wc + ' words\n\n';
+
+  if (state.images.length > 0) {
+    prompt += 'AVAILABLE IMAGES (reference by filename for placement):\n';
+    state.images.forEach(function (img) { prompt += '- ' + img.name + '\n'; });
+    prompt += '\nPlace images inline using <img src="FILENAME" alt="descriptive alt text"> tags. I will substitute the real URLs from the filename.\n\n';
+  }
+
+  prompt += 'SEO / GEO / AEO OPTIMIZATION REQUIREMENTS\n\n';
+  prompt += 'You are writing content that must perform in traditional search, generative search, and answer engines. Follow every rule unless it would produce unnatural prose.\n\n';
+  prompt += '1. Open with a 40-60 word direct answer that stands alone and includes the primary keyword.\n';
+  prompt += '2. Use the primary keyword naturally in the title, first 100 words, and 2-3 H2s. Use secondary keywords naturally.\n';
+  prompt += '3. Include 3-5 H2 headings phrased as natural questions, each followed by a short self-contained answer. Include a 3-5 item FAQ near the end.\n';
+  prompt += '4. Include citation-worthy facts: numbers, dates, materials, measurable claims, and clear declarative sentences when truthful. Avoid vague marketing superlatives.\n';
+  prompt += '5. If a target location is provided, mention it 2-3 times naturally.\n';
+  prompt += '6. Return a 150-160 character metaDescription containing the primary keyword and a click-worthy reason to read.\n';
+  prompt += '7. Return altTextSuggestions with descriptive, keyword-aware alt text when images are relevant.\n\n';
+  prompt += 'Return valid HTML using <h2>, <h3>, <p>, <ul>/<ol>/<li>, <strong>, <em>, <blockquote>, <a>, <img>. No <html> or <body> wrapper. Do NOT include <script>, <style>, <iframe>, event handlers, or javascript: URLs.\n\n';
+  prompt += 'Respond ONLY with a JSON object matching this shape: {"title":"...","metaDescription":"...","content":"<post body as HTML>","altTextSuggestions":["..."],"seoNotes":"..."}.';
+  return prompt;
+}
+
+async function apiCallWithRetry(context, url, init, attempts) {
+  let last = null;
+  for (let i = 0; i < attempts; i++) {
+    if (init && init.signal && init.signal.aborted) {
+      return { ok: false, status: 0, code: 'ABORTED', message: 'Request cancelled', data: null, durationMs: 0 };
+    }
+    last = await apiCall(context, url, init);
+    if (last.ok || (last.status !== 429 && last.code !== 'NETWORK')) return last;
+    if (init && init.signal && init.signal.aborted) return last;
+    const delay = [2000, 4000, 8000][i] || 8000;
+    await new Promise(function (resolve) { setTimeout(resolve, delay); });
+  }
+  return last;
+}
+
+async function runWithConcurrency(items, worker, onDone) {
+  let next = 0;
+  let completed = 0;
+  async function loop() {
+    while (next < items.length && state.batchRun.running) {
+      const item = items[next++];
+      await worker(item);
+      completed++;
+      if (onDone) onDone(completed, items.length);
+    }
+  }
+  const workers = [];
+  const n = Math.min(BATCH_CONCURRENCY, items.length);
+  for (let i = 0; i < n; i++) workers.push(loop());
+  await Promise.all(workers);
+}
+
+function startBatchRun(phase) {
+  state.batchRun.running = true;
+  state.batchRun.phase = phase;
+  state.batchRun.abortController = new AbortController();
+  renderBatch();
+}
+
+function finishBatchRun() {
+  state.batchRun.running = false;
+  state.batchRun.phase = null;
+  state.batchRun.abortController = null;
+  renderBatch();
+}
+
+function cancelBatchRun() {
+  if (!state.batchRun.running) return;
+  if (state.batchRun.abortController) state.batchRun.abortController.abort();
+  const phase = state.batchRun.phase;
+  if (state.batchQueue) {
+    state.batchQueue.rows.forEach(function (row) {
+      if (row.status === 'generating' || row.status === 'publishing') {
+        row.status = row.generated ? 'generated' : (isBatchBriefReady(row) ? 'ready' : 'empty');
+        row.lastError = { phase: phase, code: 'ABORTED', message: 'Cancelled by operator.', ts: Date.now() };
+      }
+    });
+    persistBatchQueue();
+  }
+  finishBatchRun();
+  showStatus('batch-status', 'Batch ' + phase + ' cancelled.', 'warning');
+}
+
+function renderBatchProgress(done, total, label) {
+  const box = document.getElementById('batch-progress');
+  const fill = document.getElementById('batch-progress-fill');
+  const text = document.getElementById('batch-progress-label');
+  if (!box || !fill || !text) return;
+  if (!state.batchRun.running && typeof total === 'undefined') {
+    box.classList.add('hidden');
+    return;
+  }
+  const rows = state.batchQueue ? state.batchQueue.rows : [];
+  const activeTotal = total || rows.filter(function (r) {
+    return r.status === 'generating' || r.status === 'publishing' || r.status === 'generated' || r.status === 'published' || r.status === 'error';
+  }).length || rows.length;
+  const activeDone = typeof done === 'number' ? done : rows.filter(function (r) {
+    return r.status === 'generated' || r.status === 'published' || r.status === 'error';
+  }).length;
+  box.classList.remove('hidden');
+  fill.style.width = activeTotal ? Math.round((activeDone / activeTotal) * 100) + '%' : '0%';
+  text.textContent = (label ? label + ' ' : '') + activeDone + ' / ' + activeTotal;
+}
+
+async function runBatchGenerate(targetRows) {
+  const active = getActiveClient();
+  const queue = ensureBatchQueueForActiveClient();
+  if (!active || !queue) return showStatus('batch-status', 'Select a client first.', 'error');
+  if (queue.clientId !== active.id) return showStatus('batch-status', 'This batch belongs to another client. Clear it first.', 'error');
+
+  queue.model = state.model;
+  queue.rows.forEach(syncBatchRowStatus);
+  const rows = (targetRows || queue.rows).filter(function (row) {
+    return isBatchBriefReady(row) && row.status !== 'published';
+  });
+  if (rows.length === 0) return showStatus('batch-status', 'No ready rows. Add a primary keyword and at least a title, angle, or key message.', 'error');
+
+  startBatchRun('generate');
+  showStatus('batch-status', 'Generating ' + rows.length + ' row' + (rows.length === 1 ? '' : 's') + '...', 'info');
+  let ok = 0;
+  let failed = 0;
+  await runWithConcurrency(rows, async function (row) {
+    row.status = 'generating';
+    row.lastError = null;
+    persistBatchQueue();
+    renderBatch();
+
+    const result = await apiCallWithRetry('batch-generate', GENERATE_ENDPOINT, {
+      method: 'POST',
+      signal: state.batchRun.abortController.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: queue.model,
+        max_tokens: 3000,
+        messages: [{ role: 'user', content: buildBatchPrompt(active, row) }]
+      })
+    }, 3);
+
+    if (!state.batchRun.running) return;
+    if (!result.ok) {
+      row.status = 'error';
+      row.lastError = { phase: 'generate', code: result.code || String(result.status || 'ERROR'), message: result.message || 'Generation failed', ts: Date.now() };
+      failed++;
+    } else {
+      const data = result.data;
+      const raw = data && Array.isArray(data.content) ? data.content.map(function (b) { return b.text || ''; }).join('').trim() : '';
+      const parsed = parseJsonFromModel(raw);
+      if (!parsed.ok) {
+        row.status = 'error';
+        row.lastError = { phase: 'generate', code: 'MODEL_JSON_PARSE', message: parsed.error || 'Model output could not be parsed as JSON', ts: Date.now() };
+        failed++;
+      } else {
+        const value = parsed.value || {};
+        let content = sanitizeHtml(value.content || '');
+        state.images.forEach(function (img) {
+          const esc = img.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          content = content.replace(new RegExp('src=["\']' + esc + '["\']', 'g'), 'src="' + img.url + '"');
+        });
+        row.generated = {
+          title: String(value.title || row.brief.title || '').substring(0, 300),
+          content: content,
+          metaDescription: String(value.metaDescription || '').substring(0, 300),
+          altTextSuggestions: Array.isArray(value.altTextSuggestions) ? value.altTextSuggestions.map(String) : [],
+          seoNotes: String(value.seoNotes || '')
+        };
+        row.status = 'generated';
+        row.lastError = null;
+        ok++;
+      }
+    }
+    persistBatchQueue();
+    renderBatch();
+  }, function (done, total) {
+    renderBatchProgress(done, total, 'Generate');
+  });
+  if (state.batchRun.running) {
+    finishBatchRun();
+    showStatus('batch-status', ok + ' generated, ' + failed + ' failed.', failed ? 'warning' : 'success');
+  }
+}
+
+async function runBatchPublish(targetRows) {
+  const active = getActiveClient();
+  const queue = ensureBatchQueueForActiveClient();
+  if (!active || !queue) return showStatus('batch-status', 'Select a client first.', 'error');
+  if (queue.clientId !== active.id) return showStatus('batch-status', 'This batch belongs to another client. Clear it first.', 'error');
+  const statusEl = document.getElementById('batch-publish-status');
+  const wpStatus = statusEl ? statusEl.value : 'pending';
+  if (wpStatus !== 'pending' && wpStatus !== 'draft') return showStatus('batch-status', 'Batch can only send Draft or Pending Review.', 'error');
+
+  const rows = (targetRows || queue.rows).filter(function (row) {
+    return row.generated && row.status !== 'published';
+  });
+  if (rows.length === 0) return showStatus('batch-status', 'No generated rows to send.', 'error');
+
+  startBatchRun('publish');
+  showStatus('batch-status', 'Sending ' + rows.length + ' row' + (rows.length === 1 ? '' : 's') + ' to WordPress...', 'info');
+  let ok = 0;
+  let failed = 0;
+  await runWithConcurrency(rows, async function (row) {
+    row.status = 'publishing';
+    row.lastError = null;
+    persistBatchQueue();
+    renderBatch();
+
+    const body = {
+      title: row.generated.title,
+      content: sanitizeHtml(row.generated.content),
+      status: wpStatus
+    };
+    if (row.generated.metaDescription) body.excerpt = row.generated.metaDescription;
+
+    const result = await apiCallWithRetry('batch-publish', active.url + '/wp-json/wp/v2/posts', {
+      method: 'POST',
+      signal: state.batchRun.abortController.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Basic ' + btoa(active.user + ':' + active.pass)
+      },
+      body: JSON.stringify(body)
+    }, 3);
+
+    if (!state.batchRun.running) return;
+    if (result.ok) {
+      row.status = 'published';
+      row.wpPostId = result.data && result.data.id ? result.data.id : null;
+      row.wpPostUrl = result.data && result.data.link ? result.data.link : null;
+      row.lastError = null;
+      ok++;
+    } else {
+      row.status = 'error';
+      row.lastError = { phase: 'publish', code: result.code || String(result.status || 'ERROR'), message: result.message || 'Publish failed', ts: Date.now() };
+      failed++;
+    }
+    persistBatchQueue();
+    renderBatch();
+  }, function (done, total) {
+    renderBatchProgress(done, total, 'Send');
+  });
+  if (state.batchRun.running) {
+    finishBatchRun();
+    showStatus('batch-status', ok + ' sent as ' + (wpStatus === 'pending' ? 'Pending Review' : 'Draft') + ', ' + failed + ' failed.', failed ? 'warning' : 'success');
+  }
+}
+
+function initBatchUi() {
+  try {
+    const addBtn = document.getElementById('batch-add-row-btn');
+    const bulkToggle = document.getElementById('batch-bulk-toggle-btn');
+    const bulkAdd = document.getElementById('batch-bulk-add-btn');
+    const clearBtn = document.getElementById('batch-clear-btn');
+    const genBtn = document.getElementById('batch-generate-btn');
+    const sendBtn = document.getElementById('batch-send-btn');
+    const cancelBtn = document.getElementById('batch-cancel-btn');
+    const list = document.getElementById('batch-list');
+    if (addBtn) addBtn.addEventListener('click', function () { addBatchRow(); });
+    if (bulkToggle) bulkToggle.addEventListener('click', function () {
+      const panel = document.getElementById('batch-bulk-panel');
+      if (panel) panel.classList.toggle('hidden');
+    });
+    if (bulkAdd) bulkAdd.addEventListener('click', addBulkBatchRows);
+    if (clearBtn) clearBtn.addEventListener('click', clearBatchQueue);
+    if (genBtn) genBtn.addEventListener('click', function () { runBatchGenerate(); });
+    if (sendBtn) sendBtn.addEventListener('click', function () { runBatchPublish(); });
+    if (cancelBtn) cancelBtn.addEventListener('click', cancelBatchRun);
+    if (list) {
+      list.addEventListener('click', handleBatchClick);
+      list.addEventListener('input', handleBatchTyping);
+      list.addEventListener('change', handleBatchInput);
+    }
+    renderBatch();
+  } catch (e) {
+    logEvent('error', 'batch-init', 'Batch UI failed to initialize', { error: String(e) });
+  }
+}
+
+/* ---------- 15. history (all clients) ---------- */
 
 /**
  * Load the 10 most recent posts from EVERY client in parallel, grouped
@@ -1972,6 +2884,8 @@ function clearAllLocalData() {
   state.activeClientId = null;
   state.images = [];
   state.currentBrief = null;
+  state.batchQueue = null;
+  state.batchOpenRows.clear();
   renderClientList();
   renderClientSelector();
   updateActiveClientUI();
@@ -2052,6 +2966,7 @@ document.addEventListener('DOMContentLoaded', function () {
   document.getElementById('refresh-history-btn').addEventListener('click', loadHistory);
   document.getElementById('post-status').addEventListener('change', toggleScheduleField);
   document.getElementById('clear-all-btn').addEventListener('click', clearAllLocalData);
+  initBatchUi();
 
   const clearLogBtn = document.getElementById('clear-log-btn');
   if (clearLogBtn) clearLogBtn.addEventListener('click', clearEventLog);

@@ -2,11 +2,14 @@
 
 A self-hosted web tool for managing blog content across multiple client WordPress sites. Each client is a profile with its own URL, credentials, and voice guide. Draft with Claude, upload images, and publish to the selected client — all from one interface.
 
+The app supports both one-post-at-a-time drafting and a Batch workflow for staging up to 15 briefs, generating SEO/GEO/AEO-ready drafts, reviewing them inline, and sending them to WordPress as Draft or Pending Review.
+
 ## Architecture
 
 - **Static frontend** hosted on Netlify: HTML/CSS/JS
 - **One Netlify Function** (`generate.js`) proxies Claude API calls — API key is server-side only
 - **Client credentials** stored per-client in the user's browser localStorage
+- **Batch queue** stored in the user's browser localStorage; generated batch content survives reloads
 - **No shared database** — each user maintains their own client profiles in their own browser
 - **History** reads directly from each client's WordPress REST API — no separate log
 
@@ -77,6 +80,18 @@ Click **Test connection** before saving. If it succeeds, click **Save client**.
 7. Client approves in their WordPress dashboard under Posts → Pending
 
 To switch clients mid-session, use the topbar dropdown. Context (brief, draft) resets; it doesn't carry over between clients.
+
+## Batch workflow
+
+1. Pick the target client from the dropdown in the topbar
+2. Open **Batch** and add up to 15 briefs, or use **Bulk paste**
+3. Fill each row's primary keyword plus title, angle, or key message
+4. Click **Generate all**; rows generate with SEO/GEO/AEO structure and per-row diagnostics
+5. Review/edit generated title, meta description, content, and SEO notes
+6. Choose **Pending review** or **Draft**
+7. Click **Send all to WordPress**
+
+Batch never offers live Publish. Generated rows are persisted in this browser until the batch is cleared.
 
 ## Files
 

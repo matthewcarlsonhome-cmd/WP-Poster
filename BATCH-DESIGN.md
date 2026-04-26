@@ -6,6 +6,30 @@
 
 A new **Batch** tab that lets one operator stage up to 15 briefs for the active client, generate them all in one run (with built-in SEO/GEO/AEO optimization), review/edit, then send the entire set to WordPress as Draft or Pending Review — never auto-Publish.
 
+## Implementation status
+
+Implemented in the current app:
+
+- Batch tab with up to 15 persisted rows for one active client
+- Manual row add, duplicate, remove, move up/down, and bulk paste
+- Per-row SEO/GEO/AEO fields, including required Primary keyword
+- SEO/GEO/AEO prompt additions with generated meta description, alt text suggestions, and SEO notes
+- Bounded concurrency of 3 for generation and WordPress sends
+- Retry/backoff on HTTP 429 and network failures
+- Per-row retry for generation and send failures
+- Cancel in-flight batch runs
+- Reload recovery for interrupted rows
+- Draft/Pending Review send only; live Publish is not offered in Batch
+- Cost estimate before generation
+
+Still future work:
+
+- Actual token/cost capture from Anthropic usage fields
+- Saved brief templates
+- Structured CSV import/export with headers
+- Cross-client batch mode
+- Anthropic Message Batches API for large async jobs
+
 ## What ships today (same-day MVP)
 
 Paste up to 15 briefs into a new Batch tab, click **Generate** to have Claude write them all (optimized for SEO, GEO, and AEO in one pass), review or edit each one inline, then click **Send** to push the whole set to WordPress as either **Draft** or **Pending Review** — your choice at send time. That's it.

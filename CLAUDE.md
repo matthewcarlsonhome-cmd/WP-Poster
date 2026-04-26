@@ -70,6 +70,10 @@ const MODEL_MIGRATIONS = {
 
 This rewrites the bad value silently on next load. Without it, anyone who saved the broken ID keeps hitting the same error until they manually clear storage. The cost of a migration entry is one line; the cost of skipping it is every debugging session starts with "open DevTools, run `localStorage.clear()`."
 
+Batch queues use a separate versioned key: `wp-publisher-batch-queue-v1`. If the batch row schema changes, add a new key (`-v2`) or a normalizer that preserves old rows. Do not silently drop generated posts; operators may have unsent work saved there.
+
+On load, any batch row left in `generating` or `publishing` is marked `error` with `INTERRUPTED`. This is deliberate: a publish request may have succeeded in WordPress even if the browser never received the response, so automatic retry could create duplicates.
+
 ## Three error response shapes — unified by apiCall()
 
 The app talks to three backends. Each returns errors differently:

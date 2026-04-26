@@ -481,6 +481,187 @@ hr { border: none; border-top: 0.5px solid var(--border); margin: 16px 0; }
 .pill-pending { background: var(--bg-warning); color: var(--text-warning); }
 .pill-scheduled { background: var(--bg-info); color: var(--text-info); }
 .pill-published { background: var(--bg-success); color: var(--text-success); }
+.pill-generating { background: var(--bg-info); color: var(--text-info); }
+.pill-error { background: var(--bg-danger); color: var(--text-danger); }
+
+/* Batch */
+.batch-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.batch-counts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-end;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.batch-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.batch-controls .btn { margin-right: 0; }
+.batch-status-select {
+  width: auto;
+  min-width: 150px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.batch-bulk-panel {
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  background: var(--bg-muted);
+  margin-bottom: 12px;
+}
+.batch-bulk-panel textarea {
+  margin-bottom: 8px;
+  background: var(--bg-surface);
+}
+.batch-progress {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
+  align-items: center;
+  margin: 10px 0 12px;
+}
+.batch-progress-track {
+  height: 9px;
+  border-radius: 999px;
+  background: var(--bg-muted);
+  border: 0.5px solid var(--border);
+  overflow: hidden;
+}
+.batch-progress-fill {
+  width: 0%;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s ease;
+}
+.batch-progress-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  min-width: 56px;
+  text-align: right;
+}
+.batch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+.batch-row {
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+.batch-row.incomplete {
+  border-color: var(--text-warning);
+}
+.batch-row-head {
+  width: 100%;
+  border: none;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  text-align: left;
+}
+.batch-row-head:hover { background: var(--bg-muted); }
+.batch-row-num {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  width: 28px;
+  flex-shrink: 0;
+}
+.batch-row-title {
+  flex: 1;
+  min-width: 0;
+}
+.batch-row-title-main {
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.batch-row-title-sub {
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.batch-row-body {
+  border-top: 0.5px solid var(--border);
+  padding: 14px;
+}
+.batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.batch-actions .btn { margin-right: 0; }
+.batch-generated-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-top: 14px;
+}
+.batch-content-textarea {
+  min-height: 220px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.batch-meta-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: right;
+  margin-top: 3px;
+}
+.batch-meta-count.over {
+  color: var(--text-danger);
+  font-weight: 600;
+}
+.batch-alt-list {
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  background: var(--bg-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.batch-alt-list ul {
+  margin-left: 18px;
+}
+.batch-row-error {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border-radius: var(--radius-md);
+  background: var(--bg-danger);
+  color: var(--text-danger);
+  font-size: 12px;
+}
+@media (max-width: 620px) {
+  .batch-header { flex-direction: column; }
+  .batch-counts { align-items: flex-start; }
+  .batch-row-head { align-items: flex-start; }
+  .batch-status-select { width: 100%; }
+}
 
 /* Clients */
 .clients-header {
