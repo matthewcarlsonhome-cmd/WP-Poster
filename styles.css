@@ -663,6 +663,40 @@ hr { border: none; border-top: 0.5px solid var(--border); margin: 16px 0; }
   .batch-status-select { width: 100%; }
 }
 
+/* Campaign */
+.campaign-client-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.campaign-client-option {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  cursor: pointer;
+}
+.campaign-client-option:hover { background: var(--bg-muted); }
+.campaign-client-option input {
+  width: auto;
+  margin-top: 3px;
+}
+.campaign-client-name {
+  font-weight: 500;
+  font-size: 13px;
+}
+.campaign-client-url {
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Clients */
 .clients-header {
   display: flex;

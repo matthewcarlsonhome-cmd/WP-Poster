@@ -26,6 +26,7 @@
     <button class="tab active" data-tab="brief">1. Brief</button>
     <button class="tab" data-tab="draft">2. Draft</button>
     <button class="tab" data-tab="batch">Batch</button>
+    <button class="tab" data-tab="campaign">Campaign</button>
     <button class="tab" data-tab="queue">Queue</button>
     <button class="tab" data-tab="images">Images</button>
     <button class="tab" data-tab="clients">Clients</button>
@@ -64,6 +65,14 @@
         <div class="brief-row">
           <label for="b-key">Key message</label>
           <textarea id="b-key" rows="2" placeholder="The one takeaway"></textarea>
+        </div>
+        <div class="brief-row">
+          <label for="b-keywords">Keywords</label>
+          <input type="text" id="b-keywords" placeholder="e.g. hot tub relaxation, hydrotherapy benefits">
+        </div>
+        <div class="brief-row">
+          <label for="b-location">Target area/location</label>
+          <input type="text" id="b-location" placeholder="e.g. Houston, TX">
         </div>
         <div class="brief-row">
           <label for="b-must">Must include</label>
@@ -218,6 +227,82 @@
 
       <div id="batch-status" class="status"></div>
       <div id="batch-list" class="batch-list"></div>
+    </div>
+  </section>
+
+  <!-- CAMPAIGN -->
+  <section id="tab-campaign" class="tab-panel">
+    <div class="card">
+      <div class="batch-header">
+        <div>
+          <div class="lbl section-lbl">One topic, multiple client sites</div>
+          <p class="small-note">Create localized, client-specific versions of one shared post idea and send each version to its own WordPress site.</p>
+        </div>
+        <div class="batch-counts">
+          <span id="campaign-row-count">0 clients</span>
+          <span id="campaign-cost-estimate">Est. cost: $0.00</span>
+        </div>
+      </div>
+
+      <div class="row2">
+        <div class="field">
+          <label class="lbl" for="campaign-topic">Shared topic</label>
+          <input type="text" id="campaign-topic" placeholder="Benefits of relaxing in hot tubs">
+        </div>
+        <div class="field">
+          <label class="lbl" for="campaign-keyword-template">Keyword template</label>
+          <input type="text" id="campaign-keyword-template" placeholder="benefits of hot tubs in {market}">
+        </div>
+      </div>
+      <div class="field">
+        <label class="lbl" for="campaign-angle">Shared angle</label>
+        <textarea id="campaign-angle" rows="2" placeholder="The common point every post should make"></textarea>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label class="lbl" for="campaign-must">Must include</label>
+          <textarea id="campaign-must" rows="2" placeholder="Products, claims, services, internal links"></textarea>
+        </div>
+        <div class="field">
+          <label class="lbl" for="campaign-cta">Default CTA</label>
+          <textarea id="campaign-cta" rows="2" placeholder="Visit our showroom or schedule a consultation"></textarea>
+        </div>
+      </div>
+      <div class="field">
+        <label class="lbl" for="campaign-length">Length</label>
+        <select id="campaign-length">
+          <option value="short">Short (500-700 words)</option>
+          <option value="medium" selected>Medium (900-1,200 words)</option>
+          <option value="long">Long (1,400-1,800 words)</option>
+        </select>
+      </div>
+
+      <hr>
+
+      <div class="campaign-client-picker">
+        <div class="lbl section-lbl">Target clients</div>
+        <div id="campaign-client-list" class="campaign-client-list"></div>
+      </div>
+
+      <div class="batch-controls">
+        <button class="btn btn-primary btn-sm" id="campaign-build-btn">Build campaign rows</button>
+        <button class="btn btn-sm" id="campaign-clear-btn">Clear campaign</button>
+        <button class="btn btn-primary btn-sm" id="campaign-generate-btn">Generate all</button>
+        <button class="btn btn-sm hidden" id="campaign-cancel-btn">Cancel</button>
+        <select id="campaign-publish-status" class="batch-status-select" aria-label="Campaign publish status">
+          <option value="pending" selected>Pending review</option>
+          <option value="draft">Draft</option>
+        </select>
+        <button class="btn btn-primary btn-sm" id="campaign-send-btn">Send all to WordPress</button>
+      </div>
+
+      <div class="batch-progress hidden" id="campaign-progress">
+        <div class="batch-progress-track"><div id="campaign-progress-fill" class="batch-progress-fill"></div></div>
+        <div id="campaign-progress-label" class="batch-progress-label">0 / 0</div>
+      </div>
+
+      <div id="campaign-status" class="status"></div>
+      <div id="campaign-list" class="batch-list"></div>
     </div>
   </section>
 

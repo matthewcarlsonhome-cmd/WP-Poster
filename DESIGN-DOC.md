@@ -8,10 +8,11 @@ A static single-page app on Netlify that lets one operator draft single posts or
 
 ## Current app state — April 2026
 
-The app now has two creation modes:
+The app now has three creation modes:
 
-1. **Single-post flow.** The original Brief → Draft → WordPress path remains intact. It supports image upload, preview, featured image selection, tags, Draft/Pending/Future/Publish workflows, and activity-log diagnostics.
+1. **Single-post flow.** The original Brief → Draft → WordPress path remains intact. It supports keyword/location context, image upload, preview, featured image selection, tags, Draft/Pending/Future/Publish workflows, and activity-log diagnostics.
 2. **Batch flow.** A new Batch tab lets the operator stage up to 15 briefs for the active client, generate SEO/GEO/AEO-ready drafts with bounded concurrency, review/edit each row, and send generated rows to WordPress as **Draft** or **Pending Review** only. Batch intentionally never offers live Publish.
+3. **Campaign flow.** A Campaign tab lets the operator enter one shared topic, select multiple clients, generate localized client-specific versions, and send each version to that client's WordPress site as **Draft** or **Pending Review** only.
 
 The current production architecture is still no-build static HTML/CSS/JS plus one Netlify Function. No server-side database has been added. Browser storage now contains client profiles, active client ID, preferred Claude model, and the current batch queue. The Anthropic model IDs in the UI and function are the tested IDs for this deployment; do not rename them from pattern-matching alone.
 
@@ -31,6 +32,18 @@ What shipped with Batch:
 - Resume-safe reload behavior: stuck `generating` / `publishing` rows become `error` with `INTERRUPTED`
 - Cost preview based on rough model rates and expected token usage
 - WordPress send body includes `excerpt` from generated `metaDescription`
+
+What shipped with Campaign:
+
+- Shared campaign brief with topic, keyword template, angle, must-include notes, CTA, and length
+- Client picker using existing client profiles
+- One campaign row per selected client
+- Per-row local market, primary keyword, and local notes
+- Per-client prompt that combines shared campaign message with each client's voice guide and local specifics
+- Generated title, content, meta description, and SEO notes
+- Bounded concurrency of 3 for generation and WordPress sends
+- Draft/Pending Review only; live Publish is intentionally excluded
+- Persistent local queue under `wp-publisher-campaign-v1`
 
 ## Design goals
 
@@ -145,6 +158,12 @@ Images uploaded this session are held in `state.images` as `{id, name, url, thum
 
 The batch queue does **not** duplicate WordPress Application Passwords. It references the active client by ID and uses the existing client profile when sending to WordPress. Only one saved batch exists per browser in v1. If the operator switches clients while a batch exists for another client, the UI asks them to clear it before starting a new one.
 
+### Campaign queue (persisted as `wp-publisher-campaign-v1`)
+
+The campaign queue stores one shared topic and one row per selected client. It does not duplicate credentials; each row references a client profile by `clientId`.
+
+See `MULTI-CLIENT-CAMPAIGN-DESIGN.md` for the full schema and prompt strategy.
+
 ### Activity log (in-memory only, 200-entry ring buffer)
 
 `appLog = [{ts, level, category, message, detail}]`. Cleared on reload. Re-rendered in the Activity tab on demand. The `detail` field holds full request/response bodies for debugging.
@@ -210,6 +229,26 @@ The batch queue does **not** duplicate WordPress Application Passwords. It refer
 ```
 
 Cancellation uses `AbortController`. Any in-flight rows are restored to `ready` or `generated` and marked with `ABORTED`. On reload, any row stuck in `generating` or `publishing` becomes `error` with `INTERRUPTED` so the operator can verify WordPress before retrying.
+
+## Data flow: "Generate and send a campaign"
+
+```
+1. Operator opens Campaign tab
+2. Operator enters one shared topic and keyword template
+3. Operator selects multiple client profiles
+4. Click "Build campaign rows"
+   a. App creates one row per selected client
+   b. Row pre-fills local market where it can infer one from the client name
+   c. Primary keyword is built from the keyword template by replacing {market}
+5. Click "Generate all"
+   a. Each row gets a separate prompt containing shared brief + that client's voice guide + local row data
+   b. Up to 3 Claude requests run at once through the existing Netlify Function
+   c. Results persist row-by-row as generated client-specific drafts
+6. Operator reviews and edits each generated version
+7. Click "Send all to WordPress"
+   a. Each row posts to its own client URL with that client's Application Password
+   b. Campaign only allows Draft or Pending Review
+```
 
 ## Error handling architecture
 
@@ -336,6 +375,7 @@ The practical path from here is to harden the new Batch surface, then move crede
 5. **Client approval notifications.** Optional email to client when posts are sent to Pending Review.
 6. **Analytics feedback loop.** Pull post performance from GA4 or Search Console and show results beside history/queue items.
 7. **Anthropic Message Batches API.** Revisit when jobs grow beyond 50 posts or cost becomes more important than interactive turnaround.
+8. **Client market defaults.** Add `market`, `serviceArea`, and `defaultCTA` fields to client profiles so Campaign rows prefill accurately instead of inferring from client names.
 
 ## Functionality roadmap
 

@@ -42,10 +42,12 @@
  *   11. Images          — upload to WP media library + featured-image picker
  *   12. Publish         — WP REST create-post call
  *   13. Queue           — per-client list view + trash button
- *   14. History         — parallel list across all clients
- *   15. Danger zone     — clear-all-data
- *   16. Utilities       — escapeText, showStatus, flashSaved
- *   17. Event wiring    — one DOMContentLoaded handler wires every listener
+ *   14. Batch           — many posts for one active client
+ *   15. Campaign        — one shared topic localized across many clients
+ *   16. History         — parallel list across all clients
+ *   17. Danger zone     — clear-all-data
+ *   18. Utilities       — escapeText, showStatus, flashSaved
+ *   19. Event wiring    — one DOMContentLoaded handler wires every listener
  *
  * Error handling contract
  * -----------------------
@@ -91,7 +93,10 @@ const state = {
   editingClientId: null,
   batchQueue: null,
   batchOpenRows: new Set(),
-  batchRun: { running: false, phase: null, abortController: null }
+  batchRun: { running: false, phase: null, abortController: null },
+  campaignQueue: null,
+  campaignOpenRows: new Set(),
+  campaignRun: { running: false, phase: null, abortController: null }
 };
 
 // localStorage keys. Centralized so migrations and cleanup have a single
@@ -100,7 +105,8 @@ const STORAGE_KEYS = {
   clients: 'wp-publisher-clients',
   active:  'wp-publisher-active-client',
   model:   'wp-publisher-model',
-  batch:   'wp-publisher-batch-queue-v1'
+  batch:   'wp-publisher-batch-queue-v1',
+  campaign:'wp-publisher-campaign-v1'
 };
 
 const BATCH_MAX_ROWS = 15;
@@ -708,6 +714,13 @@ function loadStorage() {
     state.batchQueue = null;
   }
 
+  try {
+    const campaign = localStorage.getItem(STORAGE_KEYS.campaign);
+    if (campaign) state.campaignQueue = normalizeCampaignQueue(JSON.parse(campaign));
+  } catch (e) {
+    state.campaignQueue = null;
+  }
+
   // If the saved active-client ID points to a client that no longer exists,
   // fall back to the first client or none.
   if (state.activeClientId && !getActiveClient()) {
@@ -722,6 +735,8 @@ function loadStorage() {
   updateActiveClientUI();
   recoverInterruptedBatchRows();
   renderBatch();
+  recoverInterruptedCampaignRows();
+  renderCampaign();
 }
 
 function persistClients() {
@@ -818,6 +833,7 @@ function updateActiveClientUI() {
   updateFeaturedSelect();
   updateBriefImgList();
   renderBatch();
+  renderCampaign();
 }
 
 function setActiveClient(id) {
@@ -838,6 +854,7 @@ function switchTab(name) {
   });
   if (name === 'queue') loadQueue();
   if (name === 'batch') renderBatch();
+  if (name === 'campaign') renderCampaign();
   if (name === 'brief') updateBriefImgList();
   if (name === 'history') loadHistory();
   if (name === 'clients') renderClientList();
@@ -1002,6 +1019,7 @@ function saveClientFromForm() {
   renderClientList();
   renderClientSelector();
   updateActiveClientUI();
+  renderCampaign();
 }
 
 function deleteClient(id) {
@@ -1250,6 +1268,8 @@ async function generateFromBrief() {
     audience: document.getElementById('b-audience').value.trim(),
     angle:    document.getElementById('b-angle').value.trim(),
     key:      document.getElementById('b-key').value.trim(),
+    keywords: document.getElementById('b-keywords').value.trim(),
+    location: document.getElementById('b-location').value.trim(),
     must:     document.getElementById('b-must').value.trim(),
     cta:      document.getElementById('b-cta').value.trim(),
     length:   document.getElementById('b-length').value
@@ -1275,9 +1295,18 @@ async function generateFromBrief() {
   if (brief.audience) prompt += '- Audience: ' + brief.audience + '\n';
   if (brief.angle)    prompt += '- Angle: ' + brief.angle + '\n';
   if (brief.key)      prompt += '- Key message: ' + brief.key + '\n';
+  if (brief.keywords) prompt += '- Target keywords: ' + brief.keywords + '\n';
+  if (brief.location) prompt += '- Target area/location: ' + brief.location + '\n';
   if (brief.must)     prompt += '- Must include: ' + brief.must + '\n';
   if (brief.cta)      prompt += '- Call to action: ' + brief.cta + '\n';
   prompt += '- Length: approximately ' + wc + ' words\n\n';
+
+  if (brief.keywords || brief.location) {
+    prompt += 'SEO / LOCAL CONTEXT:\n';
+    if (brief.keywords) prompt += '- Use the target keywords naturally in the title, introduction, headings, and body copy. Do not keyword-stuff.\n';
+    if (brief.location) prompt += '- Localize examples and service-area language for ' + brief.location + '. Mention the area naturally where useful.\n';
+    prompt += '\n';
+  }
 
   if (state.images.length > 0) {
     prompt += 'AVAILABLE IMAGES (reference by filename for placement):\n';
@@ -2759,7 +2788,690 @@ function initBatchUi() {
   }
 }
 
-/* ---------- 15. history (all clients) ---------- */
+/* ---------- 15. campaign (one topic, many clients) ---------- */
+
+function emptyCampaignQueue() {
+  return {
+    version: 1,
+    model: state.model,
+    brief: {
+      topic: '',
+      keywordTemplate: '',
+      angle: '',
+      must: '',
+      cta: '',
+      length: 'medium'
+    },
+    rows: [],
+    updatedAt: Date.now()
+  };
+}
+
+function normalizeCampaignQueue(q) {
+  if (!q || typeof q !== 'object') return null;
+  const clean = emptyCampaignQueue();
+  clean.model = q.model || state.model;
+  clean.brief = Object.assign(clean.brief, q.brief || {});
+  clean.updatedAt = q.updatedAt || Date.now();
+  clean.rows = Array.isArray(q.rows) ? q.rows.map(function (row) {
+    return {
+      id: row.id || generateCampaignRowId(),
+      clientId: row.clientId || '',
+      market: row.market || '',
+      primaryKeyword: row.primaryKeyword || '',
+      localNotes: row.localNotes || '',
+      status: row.status || 'ready',
+      generated: row.generated ? {
+        title: row.generated.title || '',
+        content: row.generated.content || '',
+        metaDescription: row.generated.metaDescription || '',
+        seoNotes: row.generated.seoNotes || ''
+      } : null,
+      wpPostId: row.wpPostId || null,
+      wpPostUrl: row.wpPostUrl || null,
+      lastError: row.lastError || null
+    };
+  }) : [];
+  return clean;
+}
+
+function persistCampaignQueue() {
+  if (!state.campaignQueue) {
+    localStorage.removeItem(STORAGE_KEYS.campaign);
+    return;
+  }
+  state.campaignQueue.updatedAt = Date.now();
+  localStorage.setItem(STORAGE_KEYS.campaign, JSON.stringify(state.campaignQueue));
+}
+
+function ensureCampaignQueue() {
+  if (!state.campaignQueue) {
+    state.campaignQueue = emptyCampaignQueue();
+    readCampaignBriefFromDom();
+    persistCampaignQueue();
+  }
+  return state.campaignQueue;
+}
+
+function generateCampaignRowId() {
+  return 'mc_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now().toString(36);
+}
+
+function recoverInterruptedCampaignRows() {
+  if (!state.campaignQueue) return;
+  let changed = false;
+  state.campaignQueue.rows.forEach(function (row) {
+    if (row.status === 'generating' || row.status === 'publishing') {
+      const phase = row.status === 'generating' ? 'generate' : 'publish';
+      row.status = 'error';
+      row.lastError = {
+        phase: phase,
+        code: 'INTERRUPTED',
+        message: 'The browser closed or reloaded while this campaign row was in flight. Verify WordPress before retrying a send.',
+        ts: Date.now()
+      };
+      changed = true;
+    }
+  });
+  if (changed) persistCampaignQueue();
+}
+
+function campaignStatusMeta(status) {
+  return batchStatusMeta(status);
+}
+
+function readCampaignBriefFromDom() {
+  const q = ensureCampaignQueue();
+  const get = function (id) {
+    const el = document.getElementById(id);
+    return el ? el.value.trim() : '';
+  };
+  q.brief.topic = get('campaign-topic');
+  q.brief.keywordTemplate = get('campaign-keyword-template');
+  q.brief.angle = get('campaign-angle');
+  q.brief.must = get('campaign-must');
+  q.brief.cta = get('campaign-cta');
+  const length = document.getElementById('campaign-length');
+  q.brief.length = length ? length.value : 'medium';
+  q.model = state.model;
+}
+
+function writeCampaignBriefToDom() {
+  if (!state.campaignQueue) return;
+  const b = state.campaignQueue.brief;
+  const set = function (id, val) {
+    const el = document.getElementById(id);
+    if (el) el.value = val || '';
+  };
+  set('campaign-topic', b.topic);
+  set('campaign-keyword-template', b.keywordTemplate);
+  set('campaign-angle', b.angle);
+  set('campaign-must', b.must);
+  set('campaign-cta', b.cta);
+  const length = document.getElementById('campaign-length');
+  if (length) length.value = b.length || 'medium';
+}
+
+function inferMarketFromClient(client) {
+  const name = client.name || '';
+  const dashParts = name.split(/\s+[-–—]\s+/);
+  if (dashParts.length > 1) return dashParts[dashParts.length - 1].trim();
+  const commaParts = name.split(',');
+  if (commaParts.length > 1) return commaParts[commaParts.length - 1].trim();
+  return '';
+}
+
+function keywordFromTemplate(template, market, topic) {
+  const base = template || topic || '';
+  return base.replace(/\{market\}/gi, market || '').trim();
+}
+
+function selectedCampaignClientIds() {
+  return Array.from(document.querySelectorAll('[data-campaign-client]:checked')).map(function (el) {
+    return el.value;
+  });
+}
+
+function buildCampaignRows() {
+  readCampaignBriefFromDom();
+  const q = ensureCampaignQueue();
+  if (!q.brief.topic && !q.brief.angle) {
+    return showStatus('campaign-status', 'Add a shared topic or angle first.', 'error');
+  }
+  const ids = selectedCampaignClientIds();
+  if (ids.length === 0) return showStatus('campaign-status', 'Select at least one client.', 'error');
+  q.rows = ids.map(function (id) {
+    const c = state.clients.find(function (client) { return client.id === id; });
+    const existing = q.rows.find(function (row) { return row.clientId === id; });
+    const market = existing && existing.market ? existing.market : inferMarketFromClient(c || {});
+    return existing || {
+      id: generateCampaignRowId(),
+      clientId: id,
+      market: market,
+      primaryKeyword: keywordFromTemplate(q.brief.keywordTemplate, market, q.brief.topic),
+      localNotes: '',
+      status: 'ready',
+      generated: null,
+      wpPostId: null,
+      wpPostUrl: null,
+      lastError: null
+    };
+  });
+  q.rows.forEach(function (row) {
+    if (!row.primaryKeyword) row.primaryKeyword = keywordFromTemplate(q.brief.keywordTemplate, row.market, q.brief.topic);
+    if (!row.status || row.status === 'empty') row.status = 'ready';
+    state.campaignOpenRows.add(row.id);
+  });
+  persistCampaignQueue();
+  renderCampaign();
+  showStatus('campaign-status', 'Built ' + q.rows.length + ' client row' + (q.rows.length === 1 ? '' : 's') + '.', 'success');
+}
+
+function estimateCampaignCost(rows) {
+  return estimateBatchCost(rows.map(function (row) {
+    return { brief: { primaryKeyword: row.primaryKeyword, title: row.market || row.clientId } };
+  }));
+}
+
+function renderCampaign() {
+  const list = document.getElementById('campaign-list');
+  if (!list) return;
+  const q = state.campaignQueue;
+  if (q) writeCampaignBriefToDom();
+  renderCampaignClientPicker();
+
+  const rows = q ? q.rows : [];
+  const rowCount = document.getElementById('campaign-row-count');
+  const cost = document.getElementById('campaign-cost-estimate');
+  if (rowCount) rowCount.textContent = rows.length + ' client' + (rows.length === 1 ? '' : 's');
+  if (cost) cost.textContent = 'Est. cost: $' + estimateCampaignCost(rows).toFixed(2);
+
+  list.innerHTML = '';
+  if (state.clients.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'Add clients before building a multi-client campaign.';
+    list.appendChild(empty);
+  } else if (!q || rows.length === 0) {
+    const emptyRows = document.createElement('div');
+    emptyRows.className = 'empty-state';
+    emptyRows.textContent = 'Select clients and build campaign rows.';
+    list.appendChild(emptyRows);
+  } else {
+    rows.forEach(function (row, idx) {
+      list.appendChild(renderCampaignRow(row, idx));
+    });
+  }
+
+  const genBtn = document.getElementById('campaign-generate-btn');
+  const sendBtn = document.getElementById('campaign-send-btn');
+  const cancelBtn = document.getElementById('campaign-cancel-btn');
+  if (genBtn) genBtn.disabled = state.campaignRun.running || rows.length === 0;
+  if (sendBtn) sendBtn.disabled = state.campaignRun.running || rows.filter(function (r) { return r.generated && r.status !== 'published'; }).length === 0;
+  if (cancelBtn) cancelBtn.classList.toggle('hidden', !state.campaignRun.running);
+  renderCampaignProgress();
+}
+
+function renderCampaignClientPicker() {
+  const box = document.getElementById('campaign-client-list');
+  if (!box) return;
+  const selected = new Set(state.campaignQueue ? state.campaignQueue.rows.map(function (r) { return r.clientId; }) : []);
+  box.innerHTML = '';
+  if (state.clients.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state';
+    empty.textContent = 'No clients yet.';
+    box.appendChild(empty);
+    return;
+  }
+  state.clients.forEach(function (client) {
+    const label = document.createElement('label');
+    label.className = 'campaign-client-option';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.value = client.id;
+    cb.dataset.campaignClient = '1';
+    cb.checked = selected.has(client.id);
+    const body = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'campaign-client-name';
+    name.textContent = client.name;
+    const url = document.createElement('div');
+    url.className = 'campaign-client-url';
+    url.textContent = client.url;
+    body.appendChild(name);
+    body.appendChild(url);
+    label.appendChild(cb);
+    label.appendChild(body);
+    box.appendChild(label);
+  });
+}
+
+function renderCampaignRow(row, idx) {
+  const client = state.clients.find(function (c) { return c.id === row.clientId; });
+  const wrap = document.createElement('div');
+  wrap.className = 'batch-row';
+  wrap.dataset.rowId = row.id;
+
+  const head = document.createElement('button');
+  head.type = 'button';
+  head.className = 'batch-row-head';
+  head.dataset.campaignAction = 'toggle';
+  head.dataset.rowId = row.id;
+
+  const num = document.createElement('div');
+  num.className = 'batch-row-num';
+  num.textContent = '#' + (idx + 1);
+  const title = document.createElement('div');
+  title.className = 'batch-row-title';
+  const main = document.createElement('div');
+  main.className = 'batch-row-title-main';
+  main.textContent = client ? client.name : '(missing client)';
+  const sub = document.createElement('div');
+  sub.className = 'batch-row-title-sub';
+  sub.textContent = row.primaryKeyword || row.market || 'Local market needed';
+  title.appendChild(main);
+  title.appendChild(sub);
+  const meta = campaignStatusMeta(row.status);
+  const pill = document.createElement('span');
+  pill.className = 'pill ' + meta.cls;
+  pill.textContent = meta.label;
+  head.appendChild(num);
+  head.appendChild(title);
+  head.appendChild(pill);
+  wrap.appendChild(head);
+
+  if (state.campaignOpenRows.has(row.id)) {
+    const body = document.createElement('div');
+    body.className = 'batch-row-body';
+    appendCampaignLocalFields(body, row);
+    if (row.generated) appendCampaignGeneratedFields(body, row);
+    if (row.lastError) {
+      const err = document.createElement('div');
+      err.className = 'batch-row-error';
+      err.textContent = row.lastError.phase + ' · ' + (row.lastError.code || 'ERROR') + ' · ' + row.lastError.message;
+      body.appendChild(err);
+    }
+    appendCampaignActions(body, row);
+    wrap.appendChild(body);
+  }
+  return wrap;
+}
+
+function appendCampaignLocalFields(parent, row) {
+  [
+    ['market', 'Local market', 'e.g. Houston, TX'],
+    ['primaryKeyword', 'Primary keyword', 'benefits of hot tubs in Houston'],
+    ['localNotes', 'Client/local specifics', 'Showroom details, local climate, services, neighborhoods']
+  ].forEach(function (def) {
+    const wrap = document.createElement('div');
+    wrap.className = 'brief-row';
+    const label = document.createElement('label');
+    label.textContent = def[1];
+    const input = def[0] === 'localNotes' ? document.createElement('textarea') : document.createElement('input');
+    if (def[0] === 'localNotes') input.rows = 2;
+    else input.type = 'text';
+    input.placeholder = def[2];
+    input.value = row[def[0]] || '';
+    input.dataset.rowId = row.id;
+    input.dataset.campaignField = def[0];
+    input.dataset.scope = 'row';
+    wrap.appendChild(label);
+    wrap.appendChild(input);
+    parent.appendChild(wrap);
+  });
+}
+
+function appendCampaignGeneratedFields(parent, row) {
+  const g = row.generated;
+  const group = document.createElement('div');
+  group.className = 'batch-generated-grid';
+  [
+    ['title', 'Generated title', 'input'],
+    ['metaDescription', 'Meta description', 'textarea'],
+    ['content', 'Content', 'textarea'],
+    ['seoNotes', 'SEO notes', 'textarea']
+  ].forEach(function (def) {
+    const field = document.createElement('div');
+    field.className = 'field';
+    const label = document.createElement('label');
+    label.className = 'lbl';
+    label.textContent = def[1];
+    const input = def[2] === 'input' ? document.createElement('input') : document.createElement('textarea');
+    if (def[2] === 'input') input.type = 'text';
+    else input.rows = def[0] === 'content' ? 10 : 2;
+    if (def[0] === 'content') input.className = 'batch-content-textarea';
+    input.value = g[def[0]] || '';
+    input.dataset.rowId = row.id;
+    input.dataset.campaignField = def[0];
+    input.dataset.scope = 'generated';
+    field.appendChild(label);
+    field.appendChild(input);
+    group.appendChild(field);
+  });
+  parent.appendChild(group);
+}
+
+function appendCampaignActions(parent, row) {
+  const actions = document.createElement('div');
+  actions.className = 'batch-actions';
+  [
+    ['retry-generate', 'Retry generate', 'btn btn-sm'],
+    ['retry-publish', 'Retry send', 'btn btn-sm'],
+    ['remove', 'Remove', 'btn btn-sm btn-danger']
+  ].forEach(function (def) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = def[2];
+    btn.textContent = def[1];
+    btn.dataset.campaignAction = def[0];
+    btn.dataset.rowId = row.id;
+    if (def[0] === 'retry-publish') btn.disabled = !row.generated || row.status === 'published' || state.campaignRun.running;
+    if (def[0] === 'retry-generate') btn.disabled = state.campaignRun.running;
+    if (def[0] === 'remove') btn.disabled = state.campaignRun.running;
+    actions.appendChild(btn);
+  });
+  parent.appendChild(actions);
+}
+
+function getCampaignRow(rowId) {
+  if (!state.campaignQueue) return null;
+  return state.campaignQueue.rows.find(function (r) { return r.id === rowId; }) || null;
+}
+
+function handleCampaignInput(e) {
+  const t = e.target;
+  if (!t) return;
+  if (t.id && /^campaign-(topic|keyword-template|angle|must|cta|length)$/.test(t.id)) {
+    readCampaignBriefFromDom();
+    persistCampaignQueue();
+    renderCampaign();
+    return;
+  }
+  if (!t.dataset || !t.dataset.rowId) return;
+  const row = getCampaignRow(t.dataset.rowId);
+  if (!row) return;
+  const field = t.dataset.campaignField;
+  if (t.dataset.scope === 'generated' && row.generated) {
+    row.generated[field] = field === 'content' ? sanitizeHtml(t.value) : t.value;
+    if (row.status !== 'published') row.status = 'generated';
+  } else if (t.dataset.scope === 'row') {
+    row[field] = t.value;
+    if (field === 'market' && state.campaignQueue) {
+      row.primaryKeyword = keywordFromTemplate(state.campaignQueue.brief.keywordTemplate, row.market, state.campaignQueue.brief.topic);
+    }
+    if (row.status !== 'published') row.status = row.generated ? 'generated' : 'ready';
+  }
+  row.lastError = null;
+  persistCampaignQueue();
+  renderCampaign();
+}
+
+function handleCampaignClick(e) {
+  const btn = e.target.closest('[data-campaign-action]');
+  if (!btn) return;
+  const action = btn.dataset.campaignAction;
+  const rowId = btn.dataset.rowId;
+  if (action === 'toggle') {
+    if (state.campaignOpenRows.has(rowId)) state.campaignOpenRows.delete(rowId);
+    else state.campaignOpenRows.add(rowId);
+    renderCampaign();
+    return;
+  }
+  const row = getCampaignRow(rowId);
+  if (!row || !state.campaignQueue) return;
+  if (action === 'remove') {
+    state.campaignQueue.rows = state.campaignQueue.rows.filter(function (r) { return r.id !== rowId; });
+    state.campaignOpenRows.delete(rowId);
+    persistCampaignQueue();
+    renderCampaign();
+  } else if (action === 'retry-generate') {
+    runCampaignGenerate([row]);
+  } else if (action === 'retry-publish') {
+    runCampaignPublish([row]);
+  }
+}
+
+function clearCampaignQueue() {
+  if (state.campaignRun.running) return;
+  if (state.campaignQueue && state.campaignQueue.rows.length > 0 &&
+      !confirm('Clear this multi-client campaign from this browser?')) {
+    return;
+  }
+  state.campaignQueue = emptyCampaignQueue();
+  state.campaignOpenRows.clear();
+  persistCampaignQueue();
+  writeCampaignBriefToDom();
+  renderCampaign();
+  showStatus('campaign-status', 'Campaign cleared.', 'success');
+}
+
+function buildCampaignPrompt(client, row) {
+  const q = state.campaignQueue;
+  const b = q.brief;
+  const wc = { short: '500-700', medium: '900-1,200', long: '1,400-1,800' }[b.length || 'medium'];
+  let prompt = 'You are writing a localized blog post for ' + client.name + '. Follow this client voice exactly.\n\n';
+  if (client.voice) prompt += 'CLIENT VOICE GUIDE:\n' + client.voice + '\n\n';
+  if (client.sample) prompt += 'CLIENT SAMPLE PARAGRAPH:\n' + client.sample + '\n\n';
+  prompt += 'SHARED CAMPAIGN BRIEF:\n';
+  prompt += '- Topic: ' + (b.topic || '') + '\n';
+  if (b.angle) prompt += '- Shared angle: ' + b.angle + '\n';
+  if (b.must) prompt += '- Must include: ' + b.must + '\n';
+  if (b.cta) prompt += '- Default CTA: ' + b.cta + '\n';
+  prompt += '- Length: approximately ' + wc + ' words\n\n';
+  prompt += 'CLIENT-SPECIFIC LOCALIZATION:\n';
+  prompt += '- Local market: ' + (row.market || '') + '\n';
+  prompt += '- Primary keyword: ' + (row.primaryKeyword || '') + '\n';
+  if (row.localNotes) prompt += '- Client/local specifics: ' + row.localNotes + '\n';
+  prompt += '\nWrite a substantially customized version for this client and market. Keep the core campaign message similar, but localize examples, climate/use cases, phrasing, CTA, and service-area signals so this does not read like duplicate content.\n\n';
+  prompt += 'SEO/GEO/AEO requirements: open with a 40-60 word direct answer, use the primary keyword naturally, include question-form H2s, add a short FAQ, mention the local market naturally 2-3 times, and include citation-worthy concrete details when truthful.\n\n';
+  prompt += 'Return valid HTML using <h2>, <h3>, <p>, <ul>/<ol>/<li>, <strong>, <em>, <blockquote>, <a>. No <html>, <body>, scripts, styles, iframes, event handlers, or javascript URLs.\n\n';
+  prompt += 'Respond ONLY with JSON: {"title":"...","metaDescription":"150-160 chars","content":"<post body as HTML>","seoNotes":"what was localized and why"}';
+  return prompt;
+}
+
+function startCampaignRun(phase) {
+  state.campaignRun.running = true;
+  state.campaignRun.phase = phase;
+  state.campaignRun.abortController = new AbortController();
+  renderCampaign();
+}
+
+function finishCampaignRun() {
+  state.campaignRun.running = false;
+  state.campaignRun.phase = null;
+  state.campaignRun.abortController = null;
+  renderCampaign();
+}
+
+function cancelCampaignRun() {
+  if (!state.campaignRun.running) return;
+  if (state.campaignRun.abortController) state.campaignRun.abortController.abort();
+  const phase = state.campaignRun.phase;
+  if (state.campaignQueue) {
+    state.campaignQueue.rows.forEach(function (row) {
+      if (row.status === 'generating' || row.status === 'publishing') {
+        row.status = row.generated ? 'generated' : 'ready';
+        row.lastError = { phase: phase, code: 'ABORTED', message: 'Cancelled by operator.', ts: Date.now() };
+      }
+    });
+    persistCampaignQueue();
+  }
+  finishCampaignRun();
+  showStatus('campaign-status', 'Campaign ' + phase + ' cancelled.', 'warning');
+}
+
+function renderCampaignProgress(done, total, label) {
+  const box = document.getElementById('campaign-progress');
+  const fill = document.getElementById('campaign-progress-fill');
+  const text = document.getElementById('campaign-progress-label');
+  if (!box || !fill || !text) return;
+  if (!state.campaignRun.running && typeof total === 'undefined') {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  const d = done || 0;
+  const t = total || (state.campaignQueue ? state.campaignQueue.rows.length : 0);
+  fill.style.width = t ? Math.round((d / t) * 100) + '%' : '0%';
+  text.textContent = (label ? label + ' ' : '') + d + ' / ' + t;
+}
+
+async function runCampaignGenerate(targetRows) {
+  readCampaignBriefFromDom();
+  const q = ensureCampaignQueue();
+  const rows = (targetRows || q.rows).filter(function (row) { return row.clientId && row.status !== 'published'; });
+  if (rows.length === 0) return showStatus('campaign-status', 'Build campaign rows first.', 'error');
+  startCampaignRun('generate');
+  showStatus('campaign-status', 'Generating ' + rows.length + ' localized post' + (rows.length === 1 ? '' : 's') + '...', 'info');
+  let ok = 0;
+  let failed = 0;
+  await runWithConcurrency(rows, async function (row) {
+    const client = state.clients.find(function (c) { return c.id === row.clientId; });
+    if (!client) {
+      row.status = 'error';
+      row.lastError = { phase: 'generate', code: 'MISSING_CLIENT', message: 'Client profile not found.', ts: Date.now() };
+      failed++;
+      return;
+    }
+    row.status = 'generating';
+    row.lastError = null;
+    persistCampaignQueue();
+    renderCampaign();
+    const result = await apiCallWithRetry('campaign-generate', GENERATE_ENDPOINT, {
+      method: 'POST',
+      signal: state.campaignRun.abortController.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: q.model || state.model,
+        max_tokens: 3000,
+        messages: [{ role: 'user', content: buildCampaignPrompt(client, row) }]
+      })
+    }, 3);
+    if (!state.campaignRun.running) return;
+    if (!result.ok) {
+      row.status = 'error';
+      row.lastError = { phase: 'generate', code: result.code || String(result.status || 'ERROR'), message: result.message || 'Generation failed', ts: Date.now() };
+      failed++;
+    } else {
+      const raw = result.data && Array.isArray(result.data.content) ? result.data.content.map(function (b) { return b.text || ''; }).join('').trim() : '';
+      const parsed = parseJsonFromModel(raw);
+      if (!parsed.ok) {
+        row.status = 'error';
+        row.lastError = { phase: 'generate', code: 'MODEL_JSON_PARSE', message: parsed.error || 'Model output could not be parsed as JSON', ts: Date.now() };
+        failed++;
+      } else {
+        const value = parsed.value || {};
+        row.generated = {
+          title: String(value.title || '').substring(0, 300),
+          content: sanitizeHtml(value.content || ''),
+          metaDescription: String(value.metaDescription || '').substring(0, 300),
+          seoNotes: String(value.seoNotes || '')
+        };
+        row.status = 'generated';
+        row.lastError = null;
+        ok++;
+      }
+    }
+    persistCampaignQueue();
+    renderCampaign();
+  }, function (done, total) {
+    renderCampaignProgress(done, total, 'Generate');
+  });
+  if (state.campaignRun.running) {
+    finishCampaignRun();
+    showStatus('campaign-status', ok + ' generated, ' + failed + ' failed.', failed ? 'warning' : 'success');
+  }
+}
+
+async function runCampaignPublish(targetRows) {
+  const q = ensureCampaignQueue();
+  const statusEl = document.getElementById('campaign-publish-status');
+  const wpStatus = statusEl ? statusEl.value : 'pending';
+  if (wpStatus !== 'pending' && wpStatus !== 'draft') return showStatus('campaign-status', 'Campaign can only send Draft or Pending Review.', 'error');
+  const rows = (targetRows || q.rows).filter(function (row) { return row.generated && row.status !== 'published'; });
+  if (rows.length === 0) return showStatus('campaign-status', 'No generated campaign rows to send.', 'error');
+  startCampaignRun('publish');
+  showStatus('campaign-status', 'Sending ' + rows.length + ' localized post' + (rows.length === 1 ? '' : 's') + '...', 'info');
+  let ok = 0;
+  let failed = 0;
+  await runWithConcurrency(rows, async function (row) {
+    const client = state.clients.find(function (c) { return c.id === row.clientId; });
+    if (!client) {
+      row.status = 'error';
+      row.lastError = { phase: 'publish', code: 'MISSING_CLIENT', message: 'Client profile not found.', ts: Date.now() };
+      failed++;
+      return;
+    }
+    row.status = 'publishing';
+    row.lastError = null;
+    persistCampaignQueue();
+    renderCampaign();
+    const body = {
+      title: row.generated.title,
+      content: sanitizeHtml(row.generated.content),
+      status: wpStatus
+    };
+    if (row.generated.metaDescription) body.excerpt = row.generated.metaDescription;
+    const result = await apiCallWithRetry('campaign-publish', client.url + '/wp-json/wp/v2/posts', {
+      method: 'POST',
+      signal: state.campaignRun.abortController.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Basic ' + btoa(client.user + ':' + client.pass)
+      },
+      body: JSON.stringify(body)
+    }, 3);
+    if (!state.campaignRun.running) return;
+    if (result.ok) {
+      row.status = 'published';
+      row.wpPostId = result.data && result.data.id ? result.data.id : null;
+      row.wpPostUrl = result.data && result.data.link ? result.data.link : null;
+      ok++;
+    } else {
+      row.status = 'error';
+      row.lastError = { phase: 'publish', code: result.code || String(result.status || 'ERROR'), message: result.message || 'Publish failed', ts: Date.now() };
+      failed++;
+    }
+    persistCampaignQueue();
+    renderCampaign();
+  }, function (done, total) {
+    renderCampaignProgress(done, total, 'Send');
+  });
+  if (state.campaignRun.running) {
+    finishCampaignRun();
+    showStatus('campaign-status', ok + ' sent as ' + (wpStatus === 'pending' ? 'Pending Review' : 'Draft') + ', ' + failed + ' failed.', failed ? 'warning' : 'success');
+  }
+}
+
+function initCampaignUi() {
+  try {
+    const build = document.getElementById('campaign-build-btn');
+    const clear = document.getElementById('campaign-clear-btn');
+    const generate = document.getElementById('campaign-generate-btn');
+    const send = document.getElementById('campaign-send-btn');
+    const cancel = document.getElementById('campaign-cancel-btn');
+    const list = document.getElementById('campaign-list');
+    ['campaign-topic', 'campaign-keyword-template', 'campaign-angle', 'campaign-must', 'campaign-cta', 'campaign-length'].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener('change', handleCampaignInput);
+    });
+    if (build) build.addEventListener('click', buildCampaignRows);
+    if (clear) clear.addEventListener('click', clearCampaignQueue);
+    if (generate) generate.addEventListener('click', function () { runCampaignGenerate(); });
+    if (send) send.addEventListener('click', function () { runCampaignPublish(); });
+    if (cancel) cancel.addEventListener('click', cancelCampaignRun);
+    if (list) {
+      list.addEventListener('click', handleCampaignClick);
+      list.addEventListener('change', handleCampaignInput);
+    }
+    renderCampaign();
+  } catch (e) {
+    logEvent('error', 'campaign-init', 'Campaign UI failed to initialize', { error: String(e) });
+  }
+}
+
+/* ---------- 16. history (all clients) ---------- */
 
 /**
  * Load the 10 most recent posts from EVERY client in parallel, grouped
@@ -2873,7 +3585,7 @@ async function loadHistory() {
   btn.disabled = false;
 }
 
-/* ---------- 15. danger zone ---------- */
+/* ---------- 17. danger zone ---------- */
 
 function clearAllLocalData() {
   if (!confirm('Clear all saved clients, credentials, and preferences from this browser?\n\nThis does NOT revoke Application Passwords on WordPress — do that separately if needed.')) {
@@ -2886,6 +3598,8 @@ function clearAllLocalData() {
   state.currentBrief = null;
   state.batchQueue = null;
   state.batchOpenRows.clear();
+  state.campaignQueue = null;
+  state.campaignOpenRows.clear();
   renderClientList();
   renderClientSelector();
   updateActiveClientUI();
@@ -2893,7 +3607,7 @@ function clearAllLocalData() {
   alert('All local data cleared.');
 }
 
-/* ---------- 16. helpers ---------- */
+/* ---------- 18. helpers ---------- */
 
 function showStatus(id, html, type) {
   const el = document.getElementById(id);
@@ -2907,7 +3621,7 @@ function showStatus(id, html, type) {
   }
 }
 
-/* ---------- 17. event wiring ---------- */
+/* ---------- 19. event wiring ---------- */
 
 /**
  * THE one DOMContentLoaded handler. A throw anywhere in this block will
@@ -2967,6 +3681,7 @@ document.addEventListener('DOMContentLoaded', function () {
   document.getElementById('post-status').addEventListener('change', toggleScheduleField);
   document.getElementById('clear-all-btn').addEventListener('click', clearAllLocalData);
   initBatchUi();
+  initCampaignUi();
 
   const clearLogBtn = document.getElementById('clear-log-btn');
   if (clearLogBtn) clearLogBtn.addEventListener('click', clearEventLog);

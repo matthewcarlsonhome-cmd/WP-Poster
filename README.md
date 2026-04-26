@@ -2,7 +2,7 @@
 
 A self-hosted web tool for managing blog content across multiple client WordPress sites. Each client is a profile with its own URL, credentials, and voice guide. Draft with Claude, upload images, and publish to the selected client — all from one interface.
 
-The app supports both one-post-at-a-time drafting and a Batch workflow for staging up to 15 briefs, generating SEO/GEO/AEO-ready drafts, reviewing them inline, and sending them to WordPress as Draft or Pending Review.
+The app supports one-post-at-a-time drafting, a Batch workflow for staging up to 15 briefs for one client, and a Campaign workflow for generating localized versions of one shared topic across multiple client sites.
 
 ## Architecture
 
@@ -72,7 +72,7 @@ Click **Test connection** before saving. If it succeeds, click **Save client**.
 ## Daily workflow
 
 1. Pick the target client from the dropdown in the topbar
-2. **Brief tab** → fill in the brief
+2. **Brief tab** → fill in the brief, including optional Keywords and Target area/location for SEO/local context
 3. **Images tab** → upload pool images (go to that client's media library)
 4. Click **Generate draft with Claude** — uses the active client's voice guide
 5. Edit in **Draft tab**, pick featured image and tags
@@ -92,6 +92,22 @@ To switch clients mid-session, use the topbar dropdown. Context (brief, draft) r
 7. Click **Send all to WordPress**
 
 Batch never offers live Publish. Generated rows are persisted in this browser until the batch is cleared.
+
+## Campaign workflow
+
+Use Campaign when one topic should become localized posts for several clients.
+
+1. Open **Campaign**
+2. Enter the shared topic, keyword template, angle, must-include notes, CTA, and length
+3. Select target clients
+4. Click **Build campaign rows**
+5. Fill or adjust each row's local market, primary keyword, and local notes
+6. Click **Generate all**
+7. Review/edit each generated client-specific version
+8. Choose **Pending review** or **Draft**
+9. Click **Send all to WordPress**
+
+Campaign never offers live Publish. See `MULTI-CLIENT-CAMPAIGN-DESIGN.md` for design details and future improvements.
 
 ## Files
 
