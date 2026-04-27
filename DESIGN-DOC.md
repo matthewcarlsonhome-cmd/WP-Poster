@@ -11,7 +11,7 @@ A static single-page app on Netlify that lets one operator draft single posts or
 The app now has three creation modes:
 
 1. **Single-post flow.** The original Brief → Draft → WordPress path remains intact. It supports keyword/location context, image upload, preview, featured image selection, tags, Draft/Pending/Future/Publish workflows, and activity-log diagnostics.
-2. **Batch flow.** A new Batch tab lets the operator stage up to 15 briefs for the active client, generate SEO/GEO/AEO-ready drafts with bounded concurrency, review/edit each row, and send generated rows to WordPress as **Draft** or **Pending Review** only. Batch intentionally never offers live Publish.
+2. **Batch flow.** A new Batch tab lets the operator stage up to 15 briefs for the active client, generate SEO/GEO/AEO-ready drafts one row at a time, review/edit each row, and send generated rows to WordPress as **Draft** or **Pending Review** only. Batch intentionally never offers live Publish.
 3. **Campaign flow.** A Campaign tab lets the operator enter one shared topic, select multiple clients, generate localized client-specific versions, and send each version to that client's WordPress site as **Draft** or **Pending Review** only.
 
 The current production architecture is still no-build static HTML/CSS/JS plus one Netlify Function. No server-side database has been added. Browser storage now contains client profiles, active client ID, preferred Claude model, and the current batch queue. The Anthropic model IDs in the UI and function are the tested IDs for this deployment; do not rename them from pattern-matching alone.
@@ -25,7 +25,7 @@ What shipped with Batch:
 - SEO/GEO/AEO prompt requirements built into every batch generation
 - Generated title, content, meta description, alt text suggestions, and SEO notes
 - Editable generated content before send
-- Bounded concurrency of 3 for generation and WordPress sends
+- One-at-a-time bulk generation/sending to avoid Netlify inactivity timeouts
 - Retry/backoff for HTTP 429 and network failures
 - Per-row retry for generation and send failures
 - Cancel button for in-flight batch runs
@@ -41,7 +41,7 @@ What shipped with Campaign:
 - Per-row local market, primary keyword, and local notes
 - Per-client prompt that combines shared campaign message with each client's voice guide and local specifics
 - Generated title, content, meta description, and SEO notes
-- Bounded concurrency of 3 for generation and WordPress sends
+- One-at-a-time campaign generation/sending to avoid Netlify inactivity timeouts
 - Draft/Pending Review only; live Publish is intentionally excluded
 - Persistent local queue under `wp-publisher-campaign-v1`
 
@@ -209,7 +209,7 @@ See `MULTI-CLIENT-CAMPAIGN-DESIGN.md` for the full schema and prompt strategy.
 3. Click "Generate all"
    a. Batch snapshots the selected model
    b. Ready rows move to `generating`
-   c. Up to 3 Claude requests run at once through the existing Netlify Function
+   c. Claude requests run one at a time through the existing Netlify Function
    d. 429/network failures retry with 2s/4s/8s backoff
    e. Model output is parsed with `parseJsonFromModel()`, sanitized, and persisted row-by-row
    f. Success rows become `generated`; failures become `error`
@@ -222,7 +222,7 @@ See `MULTI-CLIENT-CAMPAIGN-DESIGN.md` for the full schema and prompt strategy.
 5. Click "Send all to WordPress"
    a. Dropdown only allows `pending` or `draft`
    b. Generated rows move to `publishing`
-   c. Up to 3 WordPress POSTs run at once
+   c. WordPress POSTs run one at a time
    d. Body includes title, sanitized content, status, and excerpt from meta description
    e. Success rows store WordPress post ID/link and become `published`
    f. Failures become `error` and remain retryable
@@ -242,7 +242,7 @@ Cancellation uses `AbortController`. Any in-flight rows are restored to `ready` 
    c. Primary keyword is built from the keyword template by replacing {market}
 5. Click "Generate all"
    a. Each row gets a separate prompt containing shared brief + that client's voice guide + local row data
-   b. Up to 3 Claude requests run at once through the existing Netlify Function
+   b. Claude requests run one at a time through the existing Netlify Function
    c. Results persist row-by-row as generated client-specific drafts
 6. Operator reviews and edits each generated version
 7. Click "Send all to WordPress"

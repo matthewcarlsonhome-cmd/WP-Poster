@@ -14,7 +14,7 @@ Implemented in the current app:
 - Manual row add, duplicate, remove, move up/down, and bulk paste
 - Per-row SEO/GEO/AEO fields, including required Primary keyword
 - SEO/GEO/AEO prompt additions with generated meta description, alt text suggestions, and SEO notes
-- Bounded concurrency of 3 for generation and WordPress sends
+- One-at-a-time generation and WordPress sends to avoid Netlify inactivity timeouts
 - Retry/backoff on HTTP 429 and network failures
 - Per-row retry for generation and send failures
 - Cancel in-flight batch runs
@@ -57,7 +57,7 @@ Today's flow is one-at-a-time: fill brief → Generate → review → Publish �
 3. Fill each row's fields inline (title, angle, key points, etc.)
 4. Click "Generate all"
      → progress bar, per-row status pill flips draft → generating → generated/error
-     → one-at-a-time with configurable concurrency (default 3)
+     → one-at-a-time by default to avoid Netlify inactivity timeouts
 5. Review. Click any row to expand the generated post and edit inline.
 6. Choose Draft or Pending Review, click "Send all to WordPress"
      → per-row publishing → sent/error pill
@@ -133,9 +133,9 @@ You are writing content that must perform in three channels at once:
      array with 1–2 descriptive, keyword-aware alt-text strings.
 
 8. WORD COUNT TARGET
-   - Short brief  → 500–700 words
-   - Medium brief → 900–1,200 words
-   - Long brief   → 1,400–1,800 words
+   - Short brief  → 400–550 words
+   - Medium brief → 650–850 words
+   - Long brief   → 900–1,100 words
 
 Return JSON matching this shape:
 {
@@ -272,7 +272,7 @@ state.batch = {
       If not, highlight incomplete rows, abort.
    b. Snapshot model, disable model selector.
    c. For each row: status → 'generating', persist.
-   d. Run a bounded-concurrency loop (default 3):
+   d. Run one row at a time:
         - Build prompt (same assembler as single-post flow)
         - apiCall('batch-generate', GENERATE_ENDPOINT, {...})
         - parseJsonFromModel(raw)
@@ -288,7 +288,7 @@ state.batch = {
 4. Operator picks **Draft** or **Pending Review** at the top of the tab, clicks "Send all to WordPress"
    a. Guard: at least one row with status == 'generated'.
    b. Guard: `publish` is NEVER an allowed batch status — the dropdown only offers `draft` and `pending`. Batch cannot push content live by mistake.
-   c. For each generated row (bounded concurrency 3):
+   c. For each generated row, one at a time:
         - status → 'publishing', persist
         - Build WP body: { title, content: sanitizeHtml(content), status: <draft|pending> }
         - apiCall('batch-publish', active.url + '/wp-json/wp/v2/posts', {...})
@@ -304,7 +304,7 @@ state.batch = {
 
 ## Concurrency, rate limits, and cost
 
-**Concurrency.** Default 3 parallel requests per phase. Anthropic's tier-1 rate limit on Sonnet is well above 3 req/s; 3 gives us headroom for retries. Configurable per-user in Settings if we find the default wrong.
+**Concurrency.** Default is 1 request per phase. The first production test hit Netlify's roughly 30-second inactivity timeout on long batch generations, so reliability matters more than parallel speed until generation is moved to a streaming or async backend.
 
 **Backoff on 429.** Existing `apiCall` doesn't retry; `generateBatch()` wraps it with an exponential-backoff retry on `status === 429` or `code === 'NETWORK'` (2s / 4s / 8s, max 3 tries). Other failures are not retried automatically — they go to `error` status for the operator.
 
@@ -362,7 +362,7 @@ Per CLAUDE.md:
 
 ### Phase 1 — Hardening (target: 3–4 days after MVP)
 
-- Bounded concurrency (3), in-flight progress bar, per-row retry button.
+- One-at-a-time runs, in-flight progress bar, per-row retry button.
 - Resume-safe on reload (generated content persists, stuck rows flip to error).
 - Cost preview before Generate All.
 - Existing diagnostics pipeline extended with batch contexts.

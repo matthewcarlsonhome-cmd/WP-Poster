@@ -46,7 +46,7 @@ The current implementation is a fast client-side MVP:
   - meta description
   - HTML content
   - SEO notes
-- Generate all with bounded concurrency of 3
+- Generate all one row at a time to avoid Netlify inactivity timeouts
 - Send all as Draft or Pending Review only
 - Per-row retry for generate/send
 - Cancel in-flight campaign run

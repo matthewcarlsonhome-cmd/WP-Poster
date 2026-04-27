@@ -110,7 +110,8 @@ const STORAGE_KEYS = {
 };
 
 const BATCH_MAX_ROWS = 15;
-const BATCH_CONCURRENCY = 3;
+const BATCH_CONCURRENCY = 1;
+const BULK_GENERATE_MAX_TOKENS = 1800;
 const BATCH_AUTOSAVE_MS = 400;
 let batchAutosaveTimer = null;
 
@@ -411,6 +412,18 @@ function diagnoseError(context, result) {
       summary: 'Too many requests in a short window.',
       explanation: 'Wait 30-60 seconds and try again. If this happens regularly, check the Anthropic console for your organization\'s rate-limit tier.',
       hint: 'The Activity tab shows the last few requests with timestamps — useful for spotting bursts.'
+    };
+  }
+
+  // Pattern: Netlify returned an HTML inactivity timeout while waiting for
+  // Anthropic. This is most likely during bulk generation, where long prompts
+  // and long requested drafts can exceed the function's quiet-time window.
+  if (status === 504 && /inactivity timeout/i.test(msg + ' ' + JSON.stringify(r.data || ''))) {
+    return {
+      title: 'Generation timed out before Claude responded',
+      summary: 'Netlify waited too long without receiving data from the generation function.',
+      explanation: 'This usually means the requested draft was too long or too many bulk generations were running at once. The app now uses shorter bulk word targets and one-at-a-time generation to avoid this. Retry the failed row; if it repeats, switch that row to a shorter length or use Sonnet/Haiku instead of a slower model.',
+      hint: 'The failed request lasted about 30 seconds, which matches Netlify\'s inactivity timeout behavior.'
     };
   }
 
@@ -2196,9 +2209,9 @@ function appendBatchBriefFields(parent, row) {
   lengthSelect.dataset.field = 'length';
   lengthSelect.dataset.scope = 'brief';
   [
-    ['short', 'Short (500-700 words)'],
-    ['medium', 'Medium (900-1,200 words)'],
-    ['long', 'Long (1,400-1,800 words)']
+    ['short', 'Short (400-550 words)'],
+    ['medium', 'Medium (650-850 words)'],
+    ['long', 'Long (900-1,100 words)']
   ].forEach(function (optDef) {
     const opt = document.createElement('option');
     opt.value = optDef[0];
@@ -2496,7 +2509,7 @@ function addBulkBatchRows() {
 
 function buildBatchPrompt(active, row) {
   const b = row.brief;
-  const wc = { short: '500-700', medium: '900-1,200', long: '1,400-1,800' }[b.length || 'medium'];
+  const wc = { short: '400-550', medium: '650-850', long: '900-1,100' }[b.length || 'medium'];
   let prompt = 'You are writing a blog post for ' + active.name + '. Follow their voice guide strictly.\n\n';
   if (active.voice)  prompt += 'VOICE GUIDE:\n' + active.voice + '\n\n';
   if (active.sample) prompt += 'SAMPLE PARAGRAPH (match this rhythm and tone):\n' + active.sample + '\n\n';
@@ -2527,6 +2540,7 @@ function buildBatchPrompt(active, row) {
   prompt += '5. If a target location is provided, mention it 2-3 times naturally.\n';
   prompt += '6. Return a 150-160 character metaDescription containing the primary keyword and a click-worthy reason to read.\n';
   prompt += '7. Return altTextSuggestions with descriptive, keyword-aware alt text when images are relevant.\n\n';
+  prompt += 'Keep the draft concise enough to complete quickly; do not exceed the requested word range.\n\n';
   prompt += 'Return valid HTML using <h2>, <h3>, <p>, <ul>/<ol>/<li>, <strong>, <em>, <blockquote>, <a>, <img>. No <html> or <body> wrapper. Do NOT include <script>, <style>, <iframe>, event handlers, or javascript: URLs.\n\n';
   prompt += 'Respond ONLY with a JSON object matching this shape: {"title":"...","metaDescription":"...","content":"<post body as HTML>","altTextSuggestions":["..."],"seoNotes":"..."}.';
   return prompt;
@@ -2645,7 +2659,7 @@ async function runBatchGenerate(targetRows) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: queue.model,
-        max_tokens: 3000,
+        max_tokens: BULK_GENERATE_MAX_TOKENS,
         messages: [{ role: 'user', content: buildBatchPrompt(active, row) }]
       })
     }, 3);
@@ -3249,7 +3263,7 @@ function clearCampaignQueue() {
 function buildCampaignPrompt(client, row) {
   const q = state.campaignQueue;
   const b = q.brief;
-  const wc = { short: '500-700', medium: '900-1,200', long: '1,400-1,800' }[b.length || 'medium'];
+  const wc = { short: '400-550', medium: '650-850', long: '900-1,100' }[b.length || 'medium'];
   let prompt = 'You are writing a localized blog post for ' + client.name + '. Follow this client voice exactly.\n\n';
   if (client.voice) prompt += 'CLIENT VOICE GUIDE:\n' + client.voice + '\n\n';
   if (client.sample) prompt += 'CLIENT SAMPLE PARAGRAPH:\n' + client.sample + '\n\n';
@@ -3265,6 +3279,7 @@ function buildCampaignPrompt(client, row) {
   if (row.localNotes) prompt += '- Client/local specifics: ' + row.localNotes + '\n';
   prompt += '\nWrite a substantially customized version for this client and market. Keep the core campaign message similar, but localize examples, climate/use cases, phrasing, CTA, and service-area signals so this does not read like duplicate content.\n\n';
   prompt += 'SEO/GEO/AEO requirements: open with a 40-60 word direct answer, use the primary keyword naturally, include question-form H2s, add a short FAQ, mention the local market naturally 2-3 times, and include citation-worthy concrete details when truthful.\n\n';
+  prompt += 'Keep the draft concise enough to complete quickly; do not exceed the requested word range.\n\n';
   prompt += 'Return valid HTML using <h2>, <h3>, <p>, <ul>/<ol>/<li>, <strong>, <em>, <blockquote>, <a>. No <html>, <body>, scripts, styles, iframes, event handlers, or javascript URLs.\n\n';
   prompt += 'Respond ONLY with JSON: {"title":"...","metaDescription":"150-160 chars","content":"<post body as HTML>","seoNotes":"what was localized and why"}';
   return prompt;
@@ -3344,7 +3359,7 @@ async function runCampaignGenerate(targetRows) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: q.model || state.model,
-        max_tokens: 3000,
+        max_tokens: BULK_GENERATE_MAX_TOKENS,
         messages: [{ role: 'user', content: buildCampaignPrompt(client, row) }]
       })
     }, 3);
