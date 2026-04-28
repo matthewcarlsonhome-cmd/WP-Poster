@@ -14,7 +14,7 @@ The app now has three creation modes:
 2. **Batch flow.** A new Batch tab lets the operator stage up to 15 briefs for the active client, generate SEO/GEO/AEO-ready drafts one row at a time, review/edit each row, and send generated rows to WordPress as **Draft** or **Pending Review** only. Batch intentionally never offers live Publish.
 3. **Campaign flow.** A Campaign tab lets the operator enter one shared topic, select multiple clients, generate localized client-specific versions, and send each version to that client's WordPress site as **Draft** or **Pending Review** only.
 
-The current production architecture is still no-build static HTML/CSS/JS plus one Netlify Function. No server-side database has been added. Browser storage now contains client profiles, active client ID, preferred Claude model, and the current batch queue. The Anthropic model IDs in the UI and function are the tested IDs for this deployment; do not rename them from pattern-matching alone.
+The current production architecture is still no-build static HTML/CSS/JS plus Netlify Functions. No server-side database has been added. Browser storage now contains client profiles, active client ID, preferred Claude model, and the current batch queue. The Anthropic model IDs in the UI and functions are the tested IDs for this deployment; do not rename them from pattern-matching alone.
 
 What shipped with Batch:
 
@@ -59,7 +59,7 @@ What shipped with Campaign:
 ┌────────────────────────┐        ┌──────────────────────────┐
 │      Browser           │        │  Netlify CDN + Functions │
 │                        │        │                          │
-│  index.html + app.js   │◄──────►│  generate.js (proxy)     │
+│  index.html + app.js   │◄──────►│  generate-stream.mjs     │
 │  styles.css            │        │  Serves static files     │
 │                        │        │  Holds ANTHROPIC_API_KEY │
 │  localStorage:         │        └────────────┬─────────────┘
@@ -79,7 +79,7 @@ What shipped with Campaign:
 
 Three things worth calling out:
 
-1. **The Anthropic key never reaches the browser.** `generate.js` is the only place it's unsealed. The browser sends `{model, max_tokens, messages}` to `/.netlify/functions/generate`; the function rejects unknown origins, validates payload size + model allowlist, then forwards to Anthropic and streams back the response.
+1. **The Anthropic key never reaches the browser.** `generate-stream.mjs` is the main place it's unsealed. The browser sends `{model, max_tokens, messages}` to `/.netlify/functions/generate-stream`; the function rejects unknown origins, validates payload size + model allowlist, then forwards to Anthropic with streaming enabled and passes the streamed response back to the browser.
 2. **WordPress credentials go browser-direct.** Each client's Application Password is held in that browser's `localStorage` and used only in the `Authorization: Basic` header on requests to that specific client's site. Nothing server-side of ours touches these.
 3. **No database.** Netlify is serving static files + one function. The database is the user's browser + every client's WordPress install.
 
@@ -176,8 +176,8 @@ See `MULTI-CLIENT-CAMPAIGN-DESIGN.md` for the full schema and prompt strategy.
 3. Click "Generate"
    a. Prompt assembled:
       VOICE GUIDE + SAMPLE + BRIEF + IMAGE_FILENAMES + JSON_OUTPUT_SPEC
-   b. apiCall POST → /.netlify/functions/generate
-   c. generate.js:
+   b. apiCall POST → /.netlify/functions/generate-stream
+   c. generate-stream.mjs:
       - Origin check
       - Payload validation
       - Model allowlist check
@@ -339,7 +339,7 @@ In rough priority order:
 1. **Tier 2 migration.** Moves credentials off individual browsers and onto a single audited backend with real auth. Subsumes most of what follows, so prioritize this over incremental hardening of the current browser-storage model.
 2. **Client-side encryption for `localStorage`** (if Tier 2 is delayed). Derive a key from a passphrase entered on each session; encrypt Application Passwords at rest. Not a replacement for Tier 2 — a compromised browser process still sees the session key — but raises the bar against "someone walked up to my unlocked laptop."
 3. **Credential rotation enforcement.** Track `passUpdatedAt` per client; flag any > 90 days old in the Clients tab with a "rotate" nudge. Application Passwords can be revoked and reissued in seconds.
-4. **Per-session rate limiting on `generate.js`.** Today, a compromised browser could burn through a lot of Anthropic quota before someone notices. Add a rolling window limit per origin.
+4. **Per-session rate limiting on `generate-stream.mjs`.** Today, a compromised browser could burn through a lot of Anthropic quota before someone notices. Add a rolling window limit per origin.
 5. **HTTPS enforcement on client URLs.** Today we accept `http://` for local dev. Production should reject anything but HTTPS — add a check in `saveClientFromForm()`.
 6. **CSP tightening.** Inline style dependencies are eliminated (✅ done — italic/bold buttons moved to classes). Next step: nonce-based `script-src` so even an injected `<script>` can't run.
 7. **Audit trail for publish/delete.** Once Tier 2 is in place, log every publish/delete action with actor + timestamp. Retention 90 days.
@@ -363,7 +363,7 @@ The practical path from here is to harden the new Batch surface, then move crede
 1. **Netlify Identity + server-side client storage.** Move client profiles and Application Passwords out of individual browser storage. Keep localStorage as cache only.
 2. **Audit trail.** Once users authenticate, log generate/send/trash actions with actor, client, post ID, status, and timestamp.
 3. **Credential age tracking.** Add `passUpdatedAt` and warnings for credentials older than 90 days.
-4. **Rate limiting on `generate.js`.** Batch increases quota-burn potential, so add per-session and per-origin limits.
+4. **Rate limiting on `generate-stream.mjs`.** Batch increases quota-burn potential, so add per-session and per-origin limits.
 5. **HTTPS-only client URLs.** Keep `http://` only behind an explicit local-dev bypass.
 
 ### Product expansion

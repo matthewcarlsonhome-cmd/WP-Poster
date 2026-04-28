@@ -53,7 +53,7 @@ HTTP 400 · invalid_request_error · model: claude-sonnet-4-6-20250929
 Any time you add, rename, or remove a model, all three must be updated in sync:
 
 1. `index.html` — `<option value="...">` in the model `<select>`
-2. `generate.js` — `ALLOWED_MODELS` Set
+2. `generate-stream.mjs` and legacy `generate.js` — `ALLOWED_MODELS` Set
 3. `app.js` — the `labels` map inside `updateModelLabel()`
 
 The server allowlist (#2) is the security boundary. If a model ID is present in #1 and #3 but missing from #2, the app shows the option and pretends to save it, then fails at generate time with `HTTP 400 · Model not allowed`. Always test end-to-end after touching any of these.
@@ -82,7 +82,7 @@ The app talks to three backends. Each returns errors differently:
 |---|---|
 | WordPress REST | `{ code, message, data: { status } }` |
 | Anthropic API | `{ type: "error", error: { type, message } }` |
-| Our proxy (`generate.js`) | `{ error: "<string>" }` |
+| Our proxy (`generate-stream.mjs` / `generate.js`) | `{ error: "<string>" }` |
 
 `apiCall(context, url, init)` normalizes all three into a single result object `{ok, status, code, message, data, durationMs}` and writes to both the browser console and the Activity log. Every caller is a `result.ok` branch — no scattered try/catch, no inconsistent error surfacing.
 
@@ -195,13 +195,13 @@ The prompt asks the model to return JSON with no markdown fences. **Sonnet and O
 
 ## Deploy skew — browser vs function out of sync
 
-Netlify Functions **do not redeploy** when only static assets change. If your commit touches `app.js`, `index.html`, or `styles.css` but not `netlify/functions/generate.js`, the function keeps running the previous version. This produces browser-vs-server version skew: the browser sends a model/payload shape the server doesn't yet accept.
+Netlify Functions **do not redeploy** when only static assets change. If your commit touches `app.js`, `index.html`, or `styles.css` but not `netlify/functions/generate-stream.mjs`, the function keeps running the previous version. This produces browser-vs-server version skew: the browser sends a model/payload shape the server doesn't yet accept.
 
-**Making this self-diagnosing:** `generate.js` now includes `requested` and `allowed` fields in its "Model not allowed" response body. The browser's `diagnoseError()` branch compares the requested model against both the browser's known list and the server's echoed list. If the browser knows about it but the server doesn't, the banner explicitly says **"Server is running an older version (deploy skew)"** with the current server allowlist shown and a verification curl command included.
+**Making this self-diagnosing:** `generate-stream.mjs` and legacy `generate.js` include `requested` and `allowed` fields in the "Model not allowed" response body. The browser's `diagnoseError()` branch compares the requested model against both the browser's known list and the server's echoed list. If the browser knows about it but the server doesn't, the banner explicitly says **"Server is running an older version (deploy skew)"** with the current server allowlist shown and a verification curl command included.
 
 **To verify from terminal at any time:**
 ```bash
-curl -X POST https://wp-poster.netlify.app/.netlify/functions/generate \
+curl -X POST https://wp-poster.netlify.app/.netlify/functions/generate-stream \
   -H "Content-Type: application/json" \
   -H "Origin: https://wp-poster.netlify.app" \
   -d '{"model":"claude-sonnet-4-6","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}'
@@ -211,4 +211,4 @@ A successful response or Anthropic-side error = server current. "Model not allow
 
 **To force a function redeploy** without touching function source, trigger a manual redeploy from the Netlify dashboard: Deploys → Trigger deploy → Clear cache and deploy site. Or make a trivial edit to `netlify.toml` to invalidate the build cache.
 
-**Apply this pattern to other server-side validations.** Any time `generate.js` rejects a request, include what it actually accepts in the response body. Deploy skew becomes self-diagnosing instead of requiring manual forensics. This is the "echo the constraint" pattern — the server tells the client what it can do, not just what it can't.
+**Apply this pattern to other server-side validations.** Any time `generate-stream.mjs` rejects a request, include what it actually accepts in the response body. Deploy skew becomes self-diagnosing instead of requiring manual forensics. This is the "echo the constraint" pattern — the server tells the client what it can do, not just what it can't.

@@ -7,7 +7,7 @@ The app supports one-post-at-a-time drafting, a Batch workflow for staging up to
 ## Architecture
 
 - **Static frontend** hosted on Netlify: HTML/CSS/JS
-- **One Netlify Function** (`generate.js`) proxies Claude API calls — API key is server-side only
+- **Netlify Functions** proxy Claude API calls — `generate-stream.mjs` streams active generation responses and keeps the API key server-side
 - **Client credentials** stored per-client in the user's browser localStorage
 - **Batch queue** stored in the user's browser localStorage; generated batch content survives reloads
 - **No shared database** — each user maintains their own client profiles in their own browser
@@ -115,7 +115,8 @@ Campaign never offers live Publish. See `MULTI-CLIENT-CAMPAIGN-DESIGN.md` for de
 - `styles.css` — styling
 - `app.js` — client profile management, draft generation, publishing, history
 - `netlify.toml` — deploy config + security headers
-- `netlify/functions/generate.js` — Anthropic proxy
+- `netlify/functions/generate-stream.mjs` — streaming Anthropic proxy used by the app
+- `netlify/functions/generate.js` — legacy buffered Anthropic proxy kept as fallback/reference
 - `.gitignore`
 - `README.md` — this file
 

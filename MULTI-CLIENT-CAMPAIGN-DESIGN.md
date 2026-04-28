@@ -52,7 +52,7 @@ The current implementation is a fast client-side MVP:
 - Cancel in-flight campaign run
 - Persisted localStorage queue under `wp-publisher-campaign-v1`
 
-No server changes were needed. The existing `/.netlify/functions/generate` proxy is still sufficient.
+The workflow uses the streaming `/.netlify/functions/generate-stream` proxy so longer localized generations keep bytes flowing through Netlify instead of triggering inactivity timeouts.
 
 ## Data model
 

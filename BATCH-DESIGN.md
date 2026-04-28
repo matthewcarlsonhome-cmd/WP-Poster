@@ -160,7 +160,7 @@ Return JSON matching this shape:
 - `excerpt` ← `metaDescription` (WordPress uses `excerpt` for Yoast/RankMath meta in most setups; if a client uses a different SEO plugin, this is one extra setting to configure).
 - Alt text is left as operator-paste for now (WP's media library is per-image; automating alt-text injection across uploaded media is Phase 2).
 
-**Why this is a client-side prompt change, not a server change:** the prompt lives in `app.js` (per DESIGN-DOC.md's current architecture) and is sent as the `messages[0].content` payload. `generate.js` doesn't need to know about SEO at all — it's pass-through to Anthropic. The prompt addition is purely additive; single-post flow can opt in to the same optimization by reading the same `primaryKeyword` field, which Phase 2 will add to the single-post brief form as well.
+**Why this is mostly a client-side prompt change:** the prompt lives in `app.js` (per DESIGN-DOC.md's current architecture) and is sent as the `messages[0].content` payload. `generate-stream.mjs` doesn't need to know about SEO at all — it's pass-through to Anthropic with streaming enabled. The prompt addition is purely additive; single-post flow can opt in to the same optimization by reading the same `primaryKeyword` field.
 
 **What this is NOT doing:**
 
@@ -304,7 +304,7 @@ state.batch = {
 
 ## Concurrency, rate limits, and cost
 
-**Concurrency.** Default is 1 request per phase. The first production test hit Netlify's roughly 30-second inactivity timeout on long batch generations, so reliability matters more than parallel speed until generation is moved to a streaming or async backend.
+**Concurrency.** Default is 1 request per phase. The first production test hit Netlify's roughly 30-second inactivity timeout on long batch generations, so reliability matters more than parallel speed. The app now uses `generate-stream.mjs` so Anthropic chunks flow through Netlify instead of buffering silently.
 
 **Backoff on 429.** Existing `apiCall` doesn't retry; `generateBatch()` wraps it with an exponential-backoff retry on `status === 429` or `code === 'NETWORK'` (2s / 4s / 8s, max 3 tries). Other failures are not retried automatically — they go to `error` status for the operator.
 
@@ -344,7 +344,7 @@ Per CLAUDE.md:
 | `index.html`                    | New tab button, new `#tab-batch` panel with header + empty row list   |
 | `app.js`                        | New section "14. batch" with ~300 LOC: state, render, generate, publish |
 | `styles.css`                    | `.batch-row`, `.batch-progress`, `.pill-generating`, `.pill-error`    |
-| `netlify/functions/generate.js` | **No change.** Single-prompt contract is sufficient; batching is client-side. |
+| `netlify/functions/generate-stream.mjs` | Streaming Anthropic proxy used by the app to avoid Netlify inactivity timeouts. |
 | `CLAUDE.md`                     | Add a note in the localStorage-migrations section about `batch-queue-v1` |
 | `DESIGN-DOC.md`                 | Cross-link in the Functionality Roadmap: item #2 "Bulk select" supersedes some of this, but batch-compose is a distinct feature |
 
@@ -385,7 +385,7 @@ Per CLAUDE.md:
 
 - **No new credential flows.** Batch uses the active client's existing Application Password on every WP POST, exactly like single-post. No credentials are ever serialized into the batch queue JSON.
 - **Persisted briefs are low-sensitivity** (editorial content, not PII), but the batch queue still lives in per-browser localStorage and is cleared by the existing Export/Import flow on client swap.
-- **Rate-limit exposure.** Batch amplifies a compromised-browser scenario (a malicious actor could burn 15× the Anthropic quota per click vs 1×). This doesn't change the severity of the existing security roadmap item #4 (per-session rate limiting on `generate.js`), but it raises its priority once batch ships.
+- **Rate-limit exposure.** Batch amplifies a compromised-browser scenario (a malicious actor could burn 15× the Anthropic quota per click vs 1×). This doesn't change the severity of the existing security roadmap item #4 (per-session rate limiting on `generate-stream.mjs`), but it raises its priority once batch ships.
 
 ## What v1 explicitly is NOT
 
@@ -422,4 +422,4 @@ Per CLAUDE.md:
 - **Row limit — 15 the right number?** Picked to cover a monthly calendar with slack. If 15 feels small in practice, raise to 25; beyond that, the Anthropic Message Batches API becomes more attractive than sync fan-out.
 - **Resume policy on `publishing`-phase interruption.** Current plan: mark as `error` + `INTERRUPTED` and require operator to verify in WordPress before retry. Alternative: best-effort GET to check if the post exists. The second is slicker but introduces a new failure mode.
 - **Should batch briefs auto-inherit the last-used brief as a template?** Operators writing monthly pool-maintenance content may want each row pre-filled with the previous month's structure. Defer to Phase 2.
-- **Rate-limit on `generate.js` (security roadmap #4).** If we ship batch first, we widen the abuse surface. Sequencing suggestion: ship batch behind a feature flag, land rate-limiting within the same week.
+- **Rate-limit on `generate-stream.mjs` (security roadmap #4).** If we ship batch first, we widen the abuse surface. Sequencing suggestion: ship batch behind a feature flag, land rate-limiting within the same week.

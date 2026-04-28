@@ -117,7 +117,7 @@ let batchAutosaveTimer = null;
 
 // The one endpoint in our own backend. Everything else is a WordPress
 // REST URL under the active client's site.
-const GENERATE_ENDPOINT = '/.netlify/functions/generate';
+const GENERATE_ENDPOINT = '/.netlify/functions/generate-stream';
 
 /* ---------- 2. error handling & activity log ---------- */
 
@@ -1346,14 +1346,13 @@ async function generateFromBrief() {
       return;
     }
 
-    const data = result.data;
-    if (!data || !Array.isArray(data.content)) {
-      logEvent('error', 'generate', 'Unexpected response shape', { data: data });
+    const raw = extractClaudeText(result.data);
+    if (!raw) {
+      logEvent('error', 'generate', 'Unexpected response shape', { data: result.data });
       showStatus('brief-status', 'Generation failed · unexpected response shape (see Activity log)', 'error');
       return;
     }
 
-    const raw = data.content.map(function (b) { return b.text || ''; }).join('').trim();
     const parseResult = parseJsonFromModel(raw);
     if (!parseResult.ok) {
       logEvent('error', 'generate', 'Model did not return valid JSON', {
@@ -1510,6 +1509,34 @@ function parseJsonFromModel(raw) {
     error: attempts.length > 0 ? attempts[attempts.length - 1].error : 'no parseable JSON found',
     attempts: attempts
   };
+}
+
+function extractClaudeText(data) {
+  if (data && typeof data === 'object' && Array.isArray(data.content)) {
+    return data.content.map(function (b) { return b.text || ''; }).join('').trim();
+  }
+  if (typeof data !== 'string') return '';
+
+  let out = '';
+  const events = data.split(/\n\n+/);
+  events.forEach(function (eventBlock) {
+    const dataLines = eventBlock.split(/\n/).filter(function (line) {
+      return line.indexOf('data:') === 0;
+    });
+    dataLines.forEach(function (line) {
+      const json = line.replace(/^data:\s*/, '').trim();
+      if (!json || json === '[DONE]') return;
+      try {
+        const evt = JSON.parse(json);
+        if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
+          out += evt.delta.text || '';
+        } else if (evt.type === 'content_block_start' && evt.content_block && evt.content_block.text) {
+          out += evt.content_block.text;
+        }
+      } catch (_) {}
+    });
+  });
+  return out.trim();
 }
 
 /* ---------- 10. editor controls ---------- */
@@ -2670,8 +2697,7 @@ async function runBatchGenerate(targetRows) {
       row.lastError = { phase: 'generate', code: result.code || String(result.status || 'ERROR'), message: result.message || 'Generation failed', ts: Date.now() };
       failed++;
     } else {
-      const data = result.data;
-      const raw = data && Array.isArray(data.content) ? data.content.map(function (b) { return b.text || ''; }).join('').trim() : '';
+      const raw = extractClaudeText(result.data);
       const parsed = parseJsonFromModel(raw);
       if (!parsed.ok) {
         row.status = 'error';
@@ -3369,7 +3395,7 @@ async function runCampaignGenerate(targetRows) {
       row.lastError = { phase: 'generate', code: result.code || String(result.status || 'ERROR'), message: result.message || 'Generation failed', ts: Date.now() };
       failed++;
     } else {
-      const raw = result.data && Array.isArray(result.data.content) ? result.data.content.map(function (b) { return b.text || ''; }).join('').trim() : '';
+      const raw = extractClaudeText(result.data);
       const parsed = parseJsonFromModel(raw);
       if (!parsed.ok) {
         row.status = 'error';
