@@ -111,7 +111,7 @@ const STORAGE_KEYS = {
 
 const BATCH_MAX_ROWS = 15;
 const BATCH_CONCURRENCY = 1;
-const BULK_GENERATE_MAX_TOKENS = 2400;
+const BULK_GENERATE_MAX_TOKENS = 3000;
 const BATCH_AUTOSAVE_MS = 400;
 let batchAutosaveTimer = null;
 
@@ -2743,12 +2743,7 @@ async function runBatchGenerate(targetRows) {
         if (recovered) {
           row.generated = recovered;
           row.status = 'generated';
-          row.lastError = {
-            phase: 'generate',
-            code: 'RECOVERED_INCOMPLETE_JSON',
-            message: 'Recovered usable content from incomplete model JSON. Review before sending.',
-            ts: Date.now()
-          };
+          row.lastError = null;
           ok++;
         } else {
           row.status = 'error';
@@ -3459,12 +3454,7 @@ async function runCampaignGenerate(targetRows) {
             seoNotes: recovered.seoNotes
           };
           row.status = 'generated';
-          row.lastError = {
-            phase: 'generate',
-            code: 'RECOVERED_INCOMPLETE_JSON',
-            message: 'Recovered usable content from incomplete model JSON. Review before sending.',
-            ts: Date.now()
-          };
+          row.lastError = null;
           ok++;
         } else {
           row.status = 'error';
