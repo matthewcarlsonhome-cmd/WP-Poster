@@ -111,7 +111,7 @@ const STORAGE_KEYS = {
 
 const BATCH_MAX_ROWS = 15;
 const BATCH_CONCURRENCY = 1;
-const BULK_GENERATE_MAX_TOKENS = 1800;
+const BULK_GENERATE_MAX_TOKENS = 2400;
 const BATCH_AUTOSAVE_MS = 400;
 let batchAutosaveTimer = null;
 
@@ -1539,6 +1539,44 @@ function extractClaudeText(data) {
   return out.trim();
 }
 
+function fallbackPostFromRawModelText(raw, fallbackTitle) {
+  const text = (raw || '').trim();
+  if (!text) return null;
+  if (/^\s*</.test(text) && /<\/(p|h2|h3|ul|ol|blockquote)>/i.test(text)) {
+    return {
+      title: fallbackTitle || 'Generated post',
+      content: sanitizeHtml(text),
+      metaDescription: '',
+      altTextSuggestions: [],
+      seoNotes: 'Recovered from raw HTML because the model did not return complete JSON.'
+    };
+  }
+  const contentMatch = text.match(/"content"\s*:\s*"([\s\S]*)/);
+  if (!contentMatch) return null;
+  let content = contentMatch[1];
+  content = content
+    .replace(/",\s*"metaDescription"[\s\S]*$/i, '')
+    .replace(/",\s*"seoNotes"[\s\S]*$/i, '')
+    .replace(/",\s*"altTextSuggestions"[\s\S]*$/i, '')
+    .replace(/"\s*}\s*$/i, '');
+  content = content
+    .replace(/\\"/g, '"')
+    .replace(/\\n/g, '\n')
+    .replace(/\\\//g, '/');
+  if (!/<(p|h2|h3|ul|ol|blockquote)\b/i.test(content)) return null;
+
+  const titleMatch = text.match(/"title"\s*:\s*"([^"]{1,300})"/);
+  const metaMatch = text.match(/"metaDescription"\s*:\s*"([^"]{1,300})"/);
+  const seoMatch = text.match(/"seoNotes"\s*:\s*"([^"]{1,500})"/);
+  return {
+    title: titleMatch ? titleMatch[1] : (fallbackTitle || 'Generated post'),
+    content: sanitizeHtml(content),
+    metaDescription: metaMatch ? metaMatch[1] : '',
+    altTextSuggestions: [],
+    seoNotes: seoMatch ? seoMatch[1] : 'Recovered from incomplete JSON because the model output was cut off.'
+  };
+}
+
 /* ---------- 10. editor controls ---------- */
 
 function setView(v) {
@@ -2701,9 +2739,22 @@ async function runBatchGenerate(targetRows) {
       const raw = extractClaudeText(result.data);
       const parsed = parseJsonFromModel(raw);
       if (!parsed.ok) {
-        row.status = 'error';
-        row.lastError = { phase: 'generate', code: 'MODEL_JSON_PARSE', message: parsed.error || 'Model output could not be parsed as JSON', ts: Date.now() };
-        failed++;
+        const recovered = fallbackPostFromRawModelText(raw, row.brief.title || row.brief.primaryKeyword);
+        if (recovered) {
+          row.generated = recovered;
+          row.status = 'generated';
+          row.lastError = {
+            phase: 'generate',
+            code: 'RECOVERED_INCOMPLETE_JSON',
+            message: 'Recovered usable content from incomplete model JSON. Review before sending.',
+            ts: Date.now()
+          };
+          ok++;
+        } else {
+          row.status = 'error';
+          row.lastError = { phase: 'generate', code: 'MODEL_JSON_PARSE', message: parsed.error || 'Model output could not be parsed as JSON', ts: Date.now() };
+          failed++;
+        }
       } else {
         const value = parsed.value || {};
         let content = sanitizeHtml(value.content || '');
@@ -3399,9 +3450,27 @@ async function runCampaignGenerate(targetRows) {
       const raw = extractClaudeText(result.data);
       const parsed = parseJsonFromModel(raw);
       if (!parsed.ok) {
-        row.status = 'error';
-        row.lastError = { phase: 'generate', code: 'MODEL_JSON_PARSE', message: parsed.error || 'Model output could not be parsed as JSON', ts: Date.now() };
-        failed++;
+        const recovered = fallbackPostFromRawModelText(raw, row.primaryKeyword || row.market);
+        if (recovered) {
+          row.generated = {
+            title: recovered.title,
+            content: recovered.content,
+            metaDescription: recovered.metaDescription,
+            seoNotes: recovered.seoNotes
+          };
+          row.status = 'generated';
+          row.lastError = {
+            phase: 'generate',
+            code: 'RECOVERED_INCOMPLETE_JSON',
+            message: 'Recovered usable content from incomplete model JSON. Review before sending.',
+            ts: Date.now()
+          };
+          ok++;
+        } else {
+          row.status = 'error';
+          row.lastError = { phase: 'generate', code: 'MODEL_JSON_PARSE', message: parsed.error || 'Model output could not be parsed as JSON', ts: Date.now() };
+          failed++;
+        }
       } else {
         const value = parsed.value || {};
         row.generated = {
