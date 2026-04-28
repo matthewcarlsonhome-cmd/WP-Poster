@@ -2588,11 +2588,12 @@ async function apiCallWithRetry(context, url, init, attempts) {
   return last;
 }
 
-async function runWithConcurrency(items, worker, onDone) {
+async function runWithConcurrency(items, worker, onDone, isRunning) {
   let next = 0;
   let completed = 0;
+  const stillRunning = isRunning || function () { return state.batchRun.running; };
   async function loop() {
-    while (next < items.length && state.batchRun.running) {
+    while (next < items.length && stillRunning()) {
       const item = items[next++];
       await worker(item);
       completed++;
@@ -3418,7 +3419,7 @@ async function runCampaignGenerate(targetRows) {
     renderCampaign();
   }, function (done, total) {
     renderCampaignProgress(done, total, 'Generate');
-  });
+  }, function () { return state.campaignRun.running; });
   if (state.campaignRun.running) {
     finishCampaignRun();
     showStatus('campaign-status', ok + ' generated, ' + failed + ' failed.', failed ? 'warning' : 'success');
@@ -3478,7 +3479,7 @@ async function runCampaignPublish(targetRows) {
     renderCampaign();
   }, function (done, total) {
     renderCampaignProgress(done, total, 'Send');
-  });
+  }, function () { return state.campaignRun.running; });
   if (state.campaignRun.running) {
     finishCampaignRun();
     showStatus('campaign-status', ok + ' sent as ' + (wpStatus === 'pending' ? 'Pending Review' : 'Draft') + ', ' + failed + ' failed.', failed ? 'warning' : 'success');
