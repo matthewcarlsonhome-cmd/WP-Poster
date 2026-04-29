@@ -402,7 +402,22 @@ function diagnoseError(context, result) {
     };
   }
 
-  // Pattern: Anthropic rate limit.
+  // Pattern: our own per-IP rate limiter (in _ratelimit.js) tripped.
+  // Distinct from Anthropic's 429 because the action is different — the
+  // operator just needs to wait for the sliding window to free up.
+  if (status === 429 && r.data && r.data.error === 'Rate limit exceeded' && typeof r.data.retryAfterSec === 'number') {
+    const wait = r.data.retryAfterSec;
+    const limit = r.data.limitPerMinute;
+    return {
+      title: 'Server rate limit hit (this app)',
+      summary: 'Generation requests from your IP exceeded ' + (limit ? limit + ' per minute' : 'the per-minute cap') + '.',
+      explanation: 'This limit lives in /.netlify/functions/_ratelimit.js. It exists so a runaway batch or a compromised browser cannot burn through Anthropic quota in seconds. Try again in about ' + wait + ' second' + (wait === 1 ? '' : 's') + '.',
+      hint: 'If legitimate use is hitting this regularly, raise RATE_LIMIT_PER_MINUTE in the Netlify environment variables.'
+    };
+  }
+
+  // Pattern: Anthropic rate limit (different shape — Anthropic returns
+  // {type:"error",error:{type:"rate_limit_error",message:"..."}}).
   if (status === 429) {
     return {
       title: 'Anthropic rate limit hit',

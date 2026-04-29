@@ -12,6 +12,7 @@
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { corsHeaders, isAllowedOrigin, validateRequest } = require('./_shared.js');
+const { checkRateLimit, clientIpFromHeaders } = require('./_ratelimit.js');
 
 function jsonResponse(status, origin, body) {
   return new Response(JSON.stringify(body), {
@@ -51,6 +52,26 @@ export default async function handler(request) {
 
   const v = validateRequest(payload);
   if (!v.ok) return jsonResponse(v.status, origin, v.body);
+
+  // Rate-limit BEFORE forwarding to Anthropic so abuse can't burn quota.
+  const ip = clientIpFromHeaders(request.headers);
+  const rl = await checkRateLimit(ip);
+  if (!rl.allowed) {
+    return new Response(
+      JSON.stringify({
+        error: 'Rate limit exceeded',
+        retryAfterSec: rl.retryAfterSec,
+        limitPerMinute: rl.limit
+      }),
+      {
+        status: 429,
+        headers: Object.assign(corsHeaders(origin), {
+          'Content-Type': 'application/json',
+          'Retry-After': String(rl.retryAfterSec)
+        })
+      }
+    );
+  }
 
   const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

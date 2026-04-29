@@ -48,15 +48,16 @@ HTTP 400 · invalid_request_error · model: claude-sonnet-4-6-20250929
 
 **Before shipping any code that names a model, verify the exact ID in Anthropic's current model reference.**
 
-## Model IDs live in THREE places
+## Model IDs live in ONE place — `/models.js`
 
-Any time you add, rename, or remove a model, all three must be updated in sync:
+Used to live in five (HTML options, two function allowlists, two label maps in app.js). It's now the single source of truth at `/models.js`:
 
-1. `index.html` — `<option value="...">` in the model `<select>`
-2. `generate-stream.mjs` and legacy `generate.js` — `ALLOWED_MODELS` Set
-3. `app.js` — the `labels` map inside `updateModelLabel()`
+- The browser loads it via `<script src="models.js">` ahead of `app.js`. `populateModelSelect()` builds the `<option>` list at boot. `updateModelLabel()` and `diagnoseError()` look up labels via `modelLabel(id)`.
+- Both Netlify Functions pull `MODELS` via `require('../../models.js')` — `_shared.js` builds the `ALLOWED_MODELS` Set from it, and esbuild bundles the file into the function deploy.
 
-The server allowlist (#2) is the security boundary. If a model ID is present in #1 and #3 but missing from #2, the app shows the option and pretends to save it, then fails at generate time with `HTTP 400 · Model not allowed`. Always test end-to-end after touching any of these.
+To add or rename a model: edit `/models.js`, deploy. **No drift possible.** The schema per model is `{ id, label, uiNote, inputCostPerMtok, outputCostPerMtok }` — see the file's docblock.
+
+Note on Anthropic ID conventions: Sonnet 4.6 has NO date suffix; Sonnet 4.5 and Haiku 4.5 do. Don't pattern-match — verify against Anthropic's current model reference before adding.
 
 ## Current product modes — keep the mental models separate
 
@@ -103,6 +104,29 @@ The app talks to three backends. Each returns errors differently:
 `apiCall(context, url, init)` normalizes all three into a single result object `{ok, status, code, message, data, durationMs}` and writes to both the browser console and the Activity log. Every caller is a `result.ok` branch — no scattered try/catch, no inconsistent error surfacing.
 
 `apiCall` **never throws**. Network errors, JSON parse errors, and unexpected shapes all produce `ok: false` results. This matters for `Promise.all` flows like `loadHistory()` — one broken client can't blow up the whole batch.
+
+## Per-IP rate limit on generation — `_ratelimit.js`
+
+Both Netlify Functions go through `netlify/functions/_ratelimit.js` before forwarding to Anthropic. Sliding window, default **60 requests per minute per client IP**, stored in Netlify Blobs (`rate-limits` store, key `rl:<ip>`).
+
+Configurable via env vars (Netlify → Site settings → Environment variables):
+
+- `RATE_LIMIT_PER_MINUTE` — default 60. If a legitimate batch run hits this regularly, raise it.
+- `RATE_LIMIT_WINDOW_MS` — default 60000. Probably leave alone.
+
+When the limit trips, the function returns HTTP 429 with `{ error: "Rate limit exceeded", retryAfterSec, limitPerMinute }` plus a `Retry-After` header. The browser's `diagnoseError()` distinguishes this from Anthropic's own 429 and shows a banner naming the actual wait time.
+
+**Fail-open policy:** if Netlify Blobs is unreachable, the limiter logs and lets the request through. Rationale: a Blobs outage is internal Netlify infrastructure the client can't induce, and failing closed would punish legitimate operators during a Netlify incident. The limiter is the cheap-but-effective backstop, not a single point of failure.
+
+The pure decision logic lives in `evaluateWindow()` and is unit-tested in `tests/ratelimit.test.js`. The Blobs read/write side is verified end-to-end after deploy.
+
+## Validation lives in `_shared.js` — both functions go through it
+
+Origin allowlist, model allowlist, and payload validation (max_tokens, message shape, prompt size) all live in `netlify/functions/_shared.js`. Both `generate.js` and `generate-stream.mjs` route their request through `validateRequest(payload)` and use `corsHeaders(origin)` for response headers. Drift between the two functions is now mechanically impossible.
+
+Files starting with `_` in `netlify/functions/` are skipped by Netlify's function discovery, so `_shared.js` and `_ratelimit.js` are helpers, not deployable functions.
+
+Tests in `tests/shared.test.js` pin the contract for the validator end-to-end (model allowlist, max_tokens cap, message shape, prompt size cap).
 
 ## Generation proxy — use streaming, not buffered responses
 
