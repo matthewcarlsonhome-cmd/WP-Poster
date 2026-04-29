@@ -3612,105 +3612,136 @@ function showStatus(id, html, type) {
 /* ---------- 19. event wiring ---------- */
 
 /**
- * THE one DOMContentLoaded handler. A throw anywhere in this block will
- * cascade — all handlers below the throw-point will fail to attach and
- * the app looks dead.
+ * THE one DOMContentLoaded handler.
+ *
+ * Each wiring block is isolated with safeInit() so a throw in one block
+ * (e.g. a missing element after an HTML edit) cannot cascade and kill
+ * every later handler. The failure is logged to the Activity tab with
+ * the block name and stack — the DevTools "X is dead" debugging story
+ * stays simple.
  *
  * Debugging tip: if buttons seem dead, try typing openClientEditor(null)
  * in the DevTools console. If it opens the editor, DOMContentLoaded ran
  * fine and something else is eating the click (browser extension, for
  * example). If ReferenceError, the script itself didn't parse.
  */
-document.addEventListener('DOMContentLoaded', function () {
-  // Populate the model dropdown from models.js before loadStorage() so the
-  // saved model preference (if any) can be selected on the freshly-built list.
-  populateModelSelect();
-  loadStorage();
-
-  // Tabs
-  document.querySelectorAll('.tab').forEach(function (t) {
-    t.addEventListener('click', function () { switchTab(t.dataset.tab); });
-  });
-  document.querySelectorAll('[data-switch-tab]').forEach(function (b) {
-    b.addEventListener('click', function (e) {
-      e.preventDefault();
-      switchTab(b.dataset.switchTab);
-    });
-  });
-
-  // Active client dropdown in topbar
-  document.getElementById('active-client').addEventListener('change', function (e) {
-    setActiveClient(e.target.value);
-  });
-
-  // Client editor
-  document.getElementById('add-client-btn').addEventListener('click', function () { openClientEditor(null); });
-  document.getElementById('save-client-btn').addEventListener('click', saveClientFromForm);
-  document.getElementById('test-client-btn').addEventListener('click', testClientConnection);
-  document.getElementById('cancel-client-btn').addEventListener('click', closeClientEditor);
-
-  // Export/Import — Tier 1 file-based client sync
-  const exportBtn = document.getElementById('export-clients-btn');
-  if (exportBtn) exportBtn.addEventListener('click', exportClients);
-  const importBtn = document.getElementById('import-clients-btn');
-  const importInput = document.getElementById('import-clients-file');
-  if (importBtn && importInput) {
-    importBtn.addEventListener('click', function () { importInput.click(); });
-    importInput.addEventListener('change', function (e) {
-      const file = e.target.files && e.target.files[0];
-      if (file) importClientsFromFile(file);
-      // Reset so picking the same file twice re-triggers change
-      e.target.value = '';
+function safeInit(label, fn) {
+  try {
+    fn();
+  } catch (e) {
+    logEvent('error', 'init', 'Wiring block "' + label + '" threw: ' + e.message, {
+      label: label, error: String(e), stack: e && e.stack ? e.stack : null
     });
   }
+}
 
-  document.getElementById('save-model-btn').addEventListener('click', saveModel);
-  document.getElementById('gen-btn').addEventListener('click', generateFromBrief);
-  document.getElementById('pub-btn').addEventListener('click', publishPost);
-  document.getElementById('refresh-btn').addEventListener('click', loadQueue);
-  document.getElementById('refresh-history-btn').addEventListener('click', loadHistory);
-  document.getElementById('post-status').addEventListener('change', toggleScheduleField);
-  document.getElementById('clear-all-btn').addEventListener('click', clearAllLocalData);
-  initBatchUi();
-  initCampaignUi();
+document.addEventListener('DOMContentLoaded', function () {
+  // Boot: populate the model dropdown (from models.js) before loadStorage()
+  // so the saved model preference can be selected on the freshly-built list.
+  safeInit('boot', function () {
+    populateModelSelect();
+    loadStorage();
+  });
 
-  const clearLogBtn = document.getElementById('clear-log-btn');
-  if (clearLogBtn) clearLogBtn.addEventListener('click', clearEventLog);
-
-  // Toolbar buttons
-  document.querySelectorAll('.tb-btn').forEach(function (b) {
-    b.addEventListener('click', function () {
-      if (b.dataset.wrap) {
-        const parts = b.dataset.wrap.split('|');
-        wrapSelection(parts[0], parts[1]);
-      } else if (b.dataset.action === 'list-ul') insertList('ul');
-      else if (b.dataset.action === 'list-ol') insertList('ol');
-      else if (b.dataset.action === 'link') insertLink();
-      else if (b.dataset.action === 'image') insertImageTag();
-      else if (b.dataset.action === 'hr') insertHr();
+  safeInit('tabs', function () {
+    document.querySelectorAll('.tab').forEach(function (t) {
+      t.addEventListener('click', function () { switchTab(t.dataset.tab); });
+    });
+    document.querySelectorAll('[data-switch-tab]').forEach(function (b) {
+      b.addEventListener('click', function (e) {
+        e.preventDefault();
+        switchTab(b.dataset.switchTab);
+      });
     });
   });
 
-  document.querySelectorAll('.vt-btn').forEach(function (b) {
-    b.addEventListener('click', function () { setView(b.dataset.view); });
+  safeInit('active-client', function () {
+    document.getElementById('active-client').addEventListener('change', function (e) {
+      setActiveClient(e.target.value);
+    });
   });
 
-  // Image grid delete — event-delegated since thumbs are dynamic
-  document.getElementById('img-grid').addEventListener('click', function (e) {
-    const btn = e.target.closest('[data-remove]');
-    if (btn) removeImg(parseInt(btn.dataset.remove));
+  safeInit('client-editor', function () {
+    document.getElementById('add-client-btn').addEventListener('click', function () { openClientEditor(null); });
+    document.getElementById('save-client-btn').addEventListener('click', saveClientFromForm);
+    document.getElementById('test-client-btn').addEventListener('click', testClientConnection);
+    document.getElementById('cancel-client-btn').addEventListener('click', closeClientEditor);
   });
 
-  // Drop zone + file input
-  const dz = document.getElementById('drop-zone');
-  const fi = document.getElementById('file-input');
-  dz.addEventListener('click', function () { fi.click(); });
-  dz.addEventListener('dragover', function (e) { e.preventDefault(); dz.classList.add('drag'); });
-  dz.addEventListener('dragleave', function () { dz.classList.remove('drag'); });
-  dz.addEventListener('drop', function (e) {
-    e.preventDefault();
-    dz.classList.remove('drag');
-    handleFiles(e.dataTransfer.files);
+  safeInit('export-import', function () {
+    const exportBtn = document.getElementById('export-clients-btn');
+    if (exportBtn) exportBtn.addEventListener('click', exportClients);
+    const importBtn = document.getElementById('import-clients-btn');
+    const importInput = document.getElementById('import-clients-file');
+    if (importBtn && importInput) {
+      importBtn.addEventListener('click', function () { importInput.click(); });
+      importInput.addEventListener('change', function (e) {
+        const file = e.target.files && e.target.files[0];
+        if (file) importClientsFromFile(file);
+        // Reset so picking the same file twice re-triggers change
+        e.target.value = '';
+      });
+    }
   });
-  fi.addEventListener('change', function () { handleFiles(fi.files); });
+
+  safeInit('single-post-buttons', function () {
+    document.getElementById('save-model-btn').addEventListener('click', saveModel);
+    document.getElementById('gen-btn').addEventListener('click', generateFromBrief);
+    document.getElementById('pub-btn').addEventListener('click', publishPost);
+    document.getElementById('refresh-btn').addEventListener('click', loadQueue);
+    document.getElementById('refresh-history-btn').addEventListener('click', loadHistory);
+    document.getElementById('post-status').addEventListener('change', toggleScheduleField);
+    document.getElementById('clear-all-btn').addEventListener('click', clearAllLocalData);
+  });
+
+  safeInit('batch-ui', function () { initBatchUi(); });
+  safeInit('campaign-ui', function () { initCampaignUi(); });
+
+  safeInit('activity-clear', function () {
+    const clearLogBtn = document.getElementById('clear-log-btn');
+    if (clearLogBtn) clearLogBtn.addEventListener('click', clearEventLog);
+  });
+
+  safeInit('editor-toolbar', function () {
+    document.querySelectorAll('.tb-btn').forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (b.dataset.wrap) {
+          const parts = b.dataset.wrap.split('|');
+          wrapSelection(parts[0], parts[1]);
+        } else if (b.dataset.action === 'list-ul') insertList('ul');
+        else if (b.dataset.action === 'list-ol') insertList('ol');
+        else if (b.dataset.action === 'link') insertLink();
+        else if (b.dataset.action === 'image') insertImageTag();
+        else if (b.dataset.action === 'hr') insertHr();
+      });
+    });
+  });
+
+  safeInit('view-toggles', function () {
+    document.querySelectorAll('.vt-btn').forEach(function (b) {
+      b.addEventListener('click', function () { setView(b.dataset.view); });
+    });
+  });
+
+  safeInit('image-grid', function () {
+    // Event-delegated since thumbs are dynamic.
+    document.getElementById('img-grid').addEventListener('click', function (e) {
+      const btn = e.target.closest('[data-remove]');
+      if (btn) removeImg(parseInt(btn.dataset.remove));
+    });
+  });
+
+  safeInit('drop-zone', function () {
+    const dz = document.getElementById('drop-zone');
+    const fi = document.getElementById('file-input');
+    dz.addEventListener('click', function () { fi.click(); });
+    dz.addEventListener('dragover', function (e) { e.preventDefault(); dz.classList.add('drag'); });
+    dz.addEventListener('dragleave', function () { dz.classList.remove('drag'); });
+    dz.addEventListener('drop', function (e) {
+      e.preventDefault();
+      dz.classList.remove('drag');
+      handleFiles(e.dataTransfer.files);
+    });
+    fi.addEventListener('change', function () { handleFiles(fi.files); });
+  });
 });

@@ -155,14 +155,22 @@ Important implementation details:
 - If you change the streaming function's validation response shape, update `diagnoseError()` and the deploy-skew docs.
 - Netlify deploys functions separately enough that static-only changes can leave the function stale. When touching generation behavior, touch/check `generate-stream.mjs` and verify the deployed endpoint.
 
-## DOMContentLoaded cascade failure
+## DOMContentLoaded — defused via `safeInit()`
 
-The app wires every listener inside a single `DOMContentLoaded` handler. **A throw anywhere in that handler kills every listener below the throw point.** The symptom is "most of the app works, but X is dead" — not an obvious error.
+The app wires listeners in a single `DOMContentLoaded` handler. Each block is now wrapped in `safeInit('label', fn)` so a throw in one block is caught, logged to the Activity tab with the block name + stack, and the remaining blocks still wire up. The "most of the app works, but X is dead" cascade is no longer possible from a single null `getElementById`.
 
-Diagnostic ladder:
-1. DevTools Console → any uncaught errors at load? If yes, that's your culprit.
-2. Type a function name from the event wiring block (`openClientEditor(null)`). If it works, the script parsed and `DOMContentLoaded` partially ran — look for a `getElementById` that returned null because the target element was removed or renamed.
-3. Nothing logs? Test in Incognito. Browser extensions (password managers, ad blockers, Grammarly) can inject scripts that throw before yours runs.
+If you add a new wiring block, **wrap it in `safeInit`**. Example:
+```js
+safeInit('my-feature', function () {
+  document.getElementById('my-btn').addEventListener('click', doThing);
+});
+```
+
+Diagnostic ladder when something seems dead:
+1. Activity tab → look for a red `[init]` row. The `label` field names the failing block; the `stack` field points to the line.
+2. DevTools Console → any uncaught errors at load? `safeInit` swallows wiring throws but other top-level errors (e.g. a syntax error in `app.js`) will still surface here.
+3. Type a function from the failing area (`openClientEditor(null)`). If it works, the script parsed; the failure is in the wiring. If `ReferenceError`, the script itself didn't parse.
+4. Nothing logs? Test in Incognito. Browser extensions (password managers, ad blockers, Grammarly) can inject scripts that throw before yours runs.
 
 ## CSP strict mode means no inline styles or scripts
 
