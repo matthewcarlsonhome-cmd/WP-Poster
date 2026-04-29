@@ -58,6 +58,20 @@ Any time you add, rename, or remove a model, all three must be updated in sync:
 
 The server allowlist (#2) is the security boundary. If a model ID is present in #1 and #3 but missing from #2, the app shows the option and pretends to save it, then fails at generate time with `HTTP 400 · Model not allowed`. Always test end-to-end after touching any of these.
 
+## Current product modes — keep the mental models separate
+
+The app now has three authoring surfaces. Do not collapse them into one generic "bulk" feature; they solve different operator jobs.
+
+| Mode | Job | Scope | Publish options |
+|---|---|---|---|
+| Brief / Draft | One post for the active client | One client, one topic | Draft, Pending, Future, Publish |
+| Batch | Many topics for the active client | One client, up to 15 rows | Draft or Pending only |
+| Campaign | One shared topic localized across clients | Many clients, one row per client | Draft or Pending only |
+
+Single-post Brief now includes optional **Keywords** and **Target area/location** fields. These are sent as SEO/local context in the prompt, not stored as separate persisted draft state.
+
+Batch is for a monthly editorial calendar for one client. Campaign is for "benefits of relaxing in hot tubs" across Houston, Miami, etc. Keep their data models, UI labels, and safeguards distinct.
+
 ## localStorage migrations — add them, don't assume
 
 Users carry old values across deploys. When you rename a stored value, add an entry to the migration map in `loadStorage()`:
@@ -74,6 +88,8 @@ Batch queues use a separate versioned key: `wp-publisher-batch-queue-v1`. If the
 
 On load, any batch row left in `generating` or `publishing` is marked `error` with `INTERRUPTED`. This is deliberate: a publish request may have succeeded in WordPress even if the browser never received the response, so automatic retry could create duplicates.
 
+Campaign queues use `wp-publisher-campaign-v1`. The same rule applies: preserve rows when changing schema. Campaign rows reference existing client profiles by `clientId`; they do **not** copy WordPress credentials into the campaign queue.
+
 ## Three error response shapes — unified by apiCall()
 
 The app talks to three backends. Each returns errors differently:
@@ -87,6 +103,33 @@ The app talks to three backends. Each returns errors differently:
 `apiCall(context, url, init)` normalizes all three into a single result object `{ok, status, code, message, data, durationMs}` and writes to both the browser console and the Activity log. Every caller is a `result.ok` branch — no scattered try/catch, no inconsistent error surfacing.
 
 `apiCall` **never throws**. Network errors, JSON parse errors, and unexpected shapes all produce `ok: false` results. This matters for `Promise.all` flows like `loadHistory()` — one broken client can't blow up the whole batch.
+
+## Generation proxy — use streaming, not buffered responses
+
+The app now points `GENERATE_ENDPOINT` at:
+
+```js
+const GENERATE_ENDPOINT = '/.netlify/functions/generate-stream';
+```
+
+Do not switch it back to `/.netlify/functions/generate` unless you are deliberately testing the legacy buffered function. The buffered function caused real production failures:
+
+```text
+HTTP 504 Inactivity Timeout
+Description: Too much time has passed without sending any data for document.
+durationMs: ~30900
+```
+
+Root cause: the old proxy waited for the full Anthropic response before sending anything to the browser. Long Batch/Campaign generations could take more than Netlify's quiet-time window, so Netlify killed the function even though Claude was still working.
+
+Fix: `netlify/functions/generate-stream.mjs` calls Anthropic with `stream: true` and returns the upstream `text/event-stream` body directly. The browser then reconstructs Claude's text with `extractClaudeText()`.
+
+Important implementation details:
+
+- `extractClaudeText()` supports both old buffered Anthropic JSON and streamed SSE text deltas. Keep that backward compatibility.
+- `generate-stream.mjs` and legacy `generate.js` must share the same model allowlist and payload caps.
+- If you change the streaming function's validation response shape, update `diagnoseError()` and the deploy-skew docs.
+- Netlify deploys functions separately enough that static-only changes can leave the function stale. When touching generation behavior, touch/check `generate-stream.mjs` and verify the deployed endpoint.
 
 ## DOMContentLoaded cascade failure
 
@@ -147,6 +190,39 @@ A typical operator's DevTools console shows 20-ish warnings from extensions on p
 3. The Export/Import feature writes them to a JSON file on the user's disk. This file must **never be emailed**. Acceptable channels: 1Password shared vault, Signal, Slack DM with disappearing messages. The filename is prefixed `ssp-clients-DO-NOT-EMAIL-YYYY-MM-DD.json` as a visual reminder.
 4. On migration to Tier 2 (server-side storage), the Export/Import feature should be deprecated. See DESIGN-DOC.md.
 
+## Batch and Campaign run loops — shared helper gotcha
+
+`runWithConcurrency(items, worker, onDone, isRunning)` is shared by Batch and Campaign.
+
+Roadblock encountered: Campaign's **Generate all** and **Retry generate** initially did nothing and showed `0 generated, 0 failed`. The buttons were wired correctly; the shared helper was checking `state.batchRun.running`, so Campaign loops exited immediately because Batch was not running.
+
+Fix: `runWithConcurrency` accepts an optional `isRunning` callback. Batch uses the default Batch run flag. Campaign must pass:
+
+```js
+function () { return state.campaignRun.running; }
+```
+
+Do not remove that callback or Campaign generation/sending will silently no-op again.
+
+Current concurrency:
+
+```js
+const BATCH_CONCURRENCY = 1;
+```
+
+The name is historical. It controls the shared worker helper for both Batch and Campaign. It is intentionally `1` after timeout/debugging work. Streaming solved the inactivity timeout, but one-at-a-time generation keeps UI/debugging predictable and avoids bursts against Anthropic and WordPress.
+
+## Send button activation rules
+
+Batch and Campaign send buttons are intentionally disabled until there is generated content.
+
+- Batch **Send all to WordPress** activates when at least one row has `status === 'generated'`.
+- Campaign **Send all to WordPress** activates when at least one row has `row.generated` and `row.status !== 'published'`.
+
+This prevents empty rows from being posted to WordPress. A row must generate first, or be recovered into a generated draft by `fallbackPostFromRawModelText()`.
+
+Batch/Campaign only offer `draft` and `pending`. Do not add `publish` to bulk flows without a separate confirmation/safety design; one-click live publishing across many posts/sites has too much blast radius.
+
 ## Commenting discipline — for future-you and for Lisa
 
 Every function in `app.js` has a docblock explaining **why** it exists, not just what it does. Regex-heavy code (the sanitizer, the image-filename substitution) gets line-level comments on the order of operations because the regexes are not obvious on inspection. Section headers every ~100 lines let you jump around without scrolling blindly.
@@ -183,6 +259,31 @@ The prompt asks the model to return JSON with no markdown fences. **Sonnet and O
 **Don't add a fourth stage by getting clever with the prompt.** Every "just tell the model harder" tweak that's worked on Haiku has broken on another model. The parse-defensively pattern is robust, testable, and the same 30 lines of code regardless of which model is in use.
 
 **When the parser fails all three stages**, the error is surfaced through the diagnostic layer with `code: 'MODEL_JSON_PARSE'`. The user sees a banner suggesting regeneration or switching models. The raw model output (first 400 chars) goes to the Activity log for debugging.
+
+### Incomplete JSON recovery — do not show recovered drafts as errors
+
+Campaign testing hit this failure after streaming was introduced:
+
+```text
+MODEL_JSON_PARSE · Unterminated string in JSON at position ...
+```
+
+Root cause: Claude generated useful post HTML inside the JSON `content` field, but the JSON wrapper was cut off before the final closing quote/brace. This can happen when output length is near the token cap.
+
+Workaround in code: `fallbackPostFromRawModelText(raw, fallbackTitle)` tries to recover usable HTML from:
+
+- raw HTML output, or
+- an incomplete JSON `"content": "<html...` field
+
+If recovery succeeds, the row becomes `generated` and `lastError` must be cleared. We intentionally do **not** render a red error banner for a recovered draft. The recovery note goes into `seoNotes` so the operator knows to review before sending.
+
+Current cap:
+
+```js
+const BULK_GENERATE_MAX_TOKENS = 3000;
+```
+
+That is the server-side max. Do not lower it again as a timeout workaround now that streaming exists; lowering it increased incomplete JSON risk. If output length is still a problem, shorten the prompt or ask for shorter content, not fewer max tokens.
 
 **Testing additions:** if you add a fourth parsing stage, add test cases to `/tmp/test_parser.js` (or inline in a unit test file). Cases that matter:
 - Clean JSON
