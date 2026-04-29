@@ -1,0 +1,12 @@
+{
+  "name": "wp-publisher",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Static frontend for multi-client WordPress publishing with Claude. Tests cover the recovery layer (recovery.js) and Netlify Functions validation helper.",
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

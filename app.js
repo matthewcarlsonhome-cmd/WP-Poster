@@ -1410,30 +1410,9 @@ async function generateFromBrief() {
  * and the set of tags we need to strip is small and well-known. A DOM-based
  * sanitizer would be safer but adds a dependency we don't currently need.
  */
-function sanitizeHtml(html) {
-  if (!html) return '';
-  // 1. Strip block elements with their content (script, style, iframe, etc.)
-  html = html.replace(/<\s*(script|style|iframe|object|embed|link|meta|base|form)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, '');
-  // 2. Strip self-closing / void versions of the same tags
-  html = html.replace(/<\s*(script|style|iframe|object|embed|link|meta|base|form)\b[^>]*\/?>/gi, '');
-  // 3. Strip inline event handlers — on[anything]=...
-  html = html.replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, '');
-  html = html.replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, '');
-  html = html.replace(/\s+on[a-z]+\s*=\s*[^\s>]+/gi, '');
-  // 4. Neutralize dangerous URL schemes in href/src/xlink:href attributes
-  html = html.replace(/(href|src|xlink:href)\s*=\s*"(\s*(javascript|data|vbscript):[^"]*)"/gi, '$1="#"');
-  html = html.replace(/(href|src|xlink:href)\s*=\s*'(\s*(javascript|data|vbscript):[^']*)'/gi, "$1='#'");
-  return html;
-}
-
-function escapeText(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
+// sanitizeHtml + escapeText now live in recovery.js (loaded ahead of app.js).
+// They're attached to the global so callers below need no rewrites.
+// See recovery.js + tests/recovery.test.js.
 
 /**
  * Resilient JSON extractor for model responses.
@@ -1462,120 +1441,9 @@ function escapeText(s) {
  * The `attempts` array captures what each stage tried to parse, useful for
  * the Activity log when diagnosis is needed.
  */
-function parseJsonFromModel(raw) {
-  const attempts = [];
-
-  // Stage 1 — parse as-is. This is what well-behaved models (Sonnet, Opus)
-  // give us, and it's the fast path.
-  try {
-    return { ok: true, value: JSON.parse(raw) };
-  } catch (e1) {
-    attempts.push({ stage: 'raw', error: e1.message });
-  }
-
-  // Stage 2 — strip markdown code fences.
-  // Matches:  ```json\n{...}\n```   or   ```\n{...}\n```   or variants with
-  // trailing whitespace. Only strips if the string starts with a fence, to
-  // avoid mangling content that happens to contain ``` internally.
-  let stripped = raw.trim();
-  if (/^```/.test(stripped)) {
-    stripped = stripped
-      .replace(/^```(?:json|JSON)?\s*\n?/, '')
-      .replace(/\n?```\s*$/, '')
-      .trim();
-    try {
-      return { ok: true, value: JSON.parse(stripped) };
-    } catch (e2) {
-      attempts.push({ stage: 'fence-stripped', error: e2.message });
-    }
-  }
-
-  // Stage 3 — find the first {...} that parses. Handles preamble/postamble
-  // like "Here is the post: {...}" or "{...} Let me know if you want revisions."
-  // We try progressively smaller substrings from the first { to the last }.
-  const firstBrace = stripped.indexOf('{');
-  const lastBrace = stripped.lastIndexOf('}');
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    const candidate = stripped.slice(firstBrace, lastBrace + 1);
-    try {
-      return { ok: true, value: JSON.parse(candidate) };
-    } catch (e3) {
-      attempts.push({ stage: 'brace-extract', error: e3.message });
-    }
-  }
-
-  return {
-    ok: false,
-    error: attempts.length > 0 ? attempts[attempts.length - 1].error : 'no parseable JSON found',
-    attempts: attempts
-  };
-}
-
-function extractClaudeText(data) {
-  if (data && typeof data === 'object' && Array.isArray(data.content)) {
-    return data.content.map(function (b) { return b.text || ''; }).join('').trim();
-  }
-  if (typeof data !== 'string') return '';
-
-  let out = '';
-  const events = data.split(/\n\n+/);
-  events.forEach(function (eventBlock) {
-    const dataLines = eventBlock.split(/\n/).filter(function (line) {
-      return line.indexOf('data:') === 0;
-    });
-    dataLines.forEach(function (line) {
-      const json = line.replace(/^data:\s*/, '').trim();
-      if (!json || json === '[DONE]') return;
-      try {
-        const evt = JSON.parse(json);
-        if (evt.type === 'content_block_delta' && evt.delta && evt.delta.type === 'text_delta') {
-          out += evt.delta.text || '';
-        } else if (evt.type === 'content_block_start' && evt.content_block && evt.content_block.text) {
-          out += evt.content_block.text;
-        }
-      } catch (_) {}
-    });
-  });
-  return out.trim();
-}
-
-function fallbackPostFromRawModelText(raw, fallbackTitle) {
-  const text = (raw || '').trim();
-  if (!text) return null;
-  if (/^\s*</.test(text) && /<\/(p|h2|h3|ul|ol|blockquote)>/i.test(text)) {
-    return {
-      title: fallbackTitle || 'Generated post',
-      content: sanitizeHtml(text),
-      metaDescription: '',
-      altTextSuggestions: [],
-      seoNotes: 'Recovered from raw HTML because the model did not return complete JSON.'
-    };
-  }
-  const contentMatch = text.match(/"content"\s*:\s*"([\s\S]*)/);
-  if (!contentMatch) return null;
-  let content = contentMatch[1];
-  content = content
-    .replace(/",\s*"metaDescription"[\s\S]*$/i, '')
-    .replace(/",\s*"seoNotes"[\s\S]*$/i, '')
-    .replace(/",\s*"altTextSuggestions"[\s\S]*$/i, '')
-    .replace(/"\s*}\s*$/i, '');
-  content = content
-    .replace(/\\"/g, '"')
-    .replace(/\\n/g, '\n')
-    .replace(/\\\//g, '/');
-  if (!/<(p|h2|h3|ul|ol|blockquote)\b/i.test(content)) return null;
-
-  const titleMatch = text.match(/"title"\s*:\s*"([^"]{1,300})"/);
-  const metaMatch = text.match(/"metaDescription"\s*:\s*"([^"]{1,300})"/);
-  const seoMatch = text.match(/"seoNotes"\s*:\s*"([^"]{1,500})"/);
-  return {
-    title: titleMatch ? titleMatch[1] : (fallbackTitle || 'Generated post'),
-    content: sanitizeHtml(content),
-    metaDescription: metaMatch ? metaMatch[1] : '',
-    altTextSuggestions: [],
-    seoNotes: seoMatch ? seoMatch[1] : 'Recovered from incomplete JSON because the model output was cut off.'
-  };
-}
+// parseJsonFromModel + extractClaudeText + fallbackPostFromRawModelText now
+// live in recovery.js (loaded ahead of app.js). See recovery.js +
+// tests/recovery.test.js. This is the test-able boundary — keep it pure.
 
 /* ---------- 10. editor controls ---------- */
 
