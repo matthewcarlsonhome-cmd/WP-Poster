@@ -6,18 +6,18 @@
  * generations because bytes flow back to the browser while Claude is writing.
  */
 
+// Models come from /models.js (single source of truth shared with the
+// browser AND with generate.js). Bundled by esbuild at deploy time.
+import models from '../../models.js';
+const { MODELS } = models;
+
 const ALLOWED_ORIGINS = [
   'https://wp-poster.netlify.app'
 ];
 
 const MAX_PROMPT_CHARS = 20000;
 const MAX_TOKENS_CAP = 3000;
-
-const ALLOWED_MODELS = new Set([
-  'claude-haiku-4-5-20251001',
-  'claude-sonnet-4-6',
-  'claude-opus-4-7'
-]);
+const ALLOWED_MODELS = new Set(MODELS.map((m) => m.id));
 
 function corsHeaders(origin) {
   const corsOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];

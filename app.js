@@ -89,7 +89,9 @@ const state = {
   images: [],
   view: 'html',
   currentBrief: null,
-  model: 'claude-sonnet-4-6',
+  // Defaults to DEFAULT_MODEL_ID from models.js (loaded ahead of app.js).
+  // loadStorage() may overwrite from localStorage on boot.
+  model: typeof DEFAULT_MODEL_ID !== 'undefined' ? DEFAULT_MODEL_ID : 'claude-sonnet-4-6',
   editingClientId: null,
   batchQueue: null,
   batchOpenRows: new Set(),
@@ -321,27 +323,22 @@ function diagnoseError(context, result) {
   // Helper: reset the saved model to the current default. Used by fix buttons
   // when a stale model ID is the problem.
   function resetModelToDefault() {
-    const DEFAULT = 'claude-sonnet-4-6';
-    localStorage.setItem(STORAGE_KEYS.model, DEFAULT);
-    state.model = DEFAULT;
+    localStorage.setItem(STORAGE_KEYS.model, DEFAULT_MODEL_ID);
+    state.model = DEFAULT_MODEL_ID;
     const sel = document.getElementById('model-select');
-    if (sel) sel.value = DEFAULT;
+    if (sel) sel.value = DEFAULT_MODEL_ID;
     updateModelLabel();
-    logEvent('info', 'diagnostic-fix', 'Model reset to ' + DEFAULT);
+    logEvent('info', 'diagnostic-fix', 'Model reset to ' + DEFAULT_MODEL_ID);
   }
 
   // Pattern: model returned something that isn't parseable JSON even after
   // three fallback attempts (raw parse, fence strip, brace extract).
   // Typically seen with Haiku, which sometimes adds prose or malformed fences.
   if (code === 'MODEL_JSON_PARSE') {
-    const modelLabel = ({
-      'claude-haiku-4-5-20251001': 'Haiku 4.5',
-      'claude-sonnet-4-6': 'Sonnet 4.6',
-      'claude-opus-4-7': 'Opus 4.7'
-    })[state.model] || state.model;
+    const label = modelLabel(state.model);
     return {
       title: 'Model output was not valid JSON',
-      summary: modelLabel + " returned text we couldn't parse, even after stripping markdown fences and extracting braces.",
+      summary: label + " returned text we couldn't parse, even after stripping markdown fences and extracting braces.",
       explanation: "This is most common with Haiku — smaller models have weaker instruction-following for output format. The prompt asks for pure JSON; sometimes the response wraps it in ```json fences, adds a preamble like \"Here is the post:\", or splits it across the content in a way our parser can't recover. The raw output is in the Activity log under this error.",
       hint: 'Try regenerating — model output is non-deterministic, so the same brief often works on a second attempt. If it keeps failing, switch to Sonnet 4.6 (the next-up model) in Settings.'
     };
@@ -355,7 +352,7 @@ function diagnoseError(context, result) {
       title: "Claude doesn't recognize that model ID",
       summary: '"' + badModel + '" is not a current Anthropic model.',
       explanation: "This almost always means a stale preference from an older version of this app. The saved model ID needs to be updated to one Anthropic currently recognizes.",
-      fix: { label: 'Reset model to Sonnet 4.6', run: resetModelToDefault }
+      fix: { label: 'Reset model to ' + modelLabel(DEFAULT_MODEL_ID), run: resetModelToDefault }
     };
   }
 
@@ -368,7 +365,7 @@ function diagnoseError(context, result) {
   // explicitly so the operator isn't left guessing.
   if (status === 400 && /^Model not allowed/i.test(msg)) {
     const serverAllowed = (r.data && Array.isArray(r.data.allowed)) ? r.data.allowed : null;
-    const browserKnown = ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-7'];
+    const browserKnown = modelIds();
     const requested = (r.data && r.data.requested) || state.model;
 
     // Deploy skew: browser knows about the model, server doesn't
@@ -392,7 +389,7 @@ function diagnoseError(context, result) {
       explanation: "The Netlify Function has its own allowlist to prevent unauthorized model IDs from reaching Anthropic. " +
         (serverAllowed ? 'Server accepts: ' + serverAllowed.join(', ') + '. ' : '') +
         "Either this browser has a stale model preference, or the allowlist in generate.js needs updating.",
-      fix: { label: 'Reset model to Sonnet 4.6', run: resetModelToDefault }
+      fix: { label: 'Reset model to ' + modelLabel(DEFAULT_MODEL_ID), run: resetModelToDefault }
     };
   }
 
@@ -1235,12 +1232,23 @@ function saveModel() {
 function updateModelLabel() {
   const el = document.getElementById('current-model-label');
   if (!el) return;
-  const labels = {
-    'claude-haiku-4-5-20251001': 'Haiku 4.5',
-    'claude-sonnet-4-6': 'Sonnet 4.6',
-    'claude-opus-4-7': 'Opus 4.7'
-  };
-  el.textContent = labels[state.model] || state.model;
+  el.textContent = modelLabel(state.model);
+}
+
+// Build the <option> list inside #model-select from models.js. Called once at
+// boot — replaces the hardcoded options that used to live in index.html and
+// drift out of sync with the server allowlist.
+function populateModelSelect() {
+  const sel = document.getElementById('model-select');
+  if (!sel) return;
+  sel.innerHTML = '';
+  MODELS.forEach(function (m) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label + ' — ' + m.uiNote;
+    if (m.id === DEFAULT_MODEL_ID) opt.selected = true;
+    sel.appendChild(opt);
+  });
 }
 
 function flashSaved(id) {
@@ -1987,17 +1995,13 @@ function batchStatusMeta(status) {
 }
 
 function estimateBatchCost(rows) {
-  const model = state.batchRun.running && state.batchQueue ? state.batchQueue.model : state.model;
+  const modelId = state.batchRun.running && state.batchQueue ? state.batchQueue.model : state.model;
   const count = rows.filter(function (r) { return isBatchBriefReady(r); }).length;
-  const rates = {
-    'claude-haiku-4-5-20251001': { input: 1, output: 5 },
-    'claude-sonnet-4-6': { input: 3, output: 15 },
-    'claude-opus-4-7': { input: 5, output: 25 }
-  };
-  const rate = rates[model] || rates['claude-sonnet-4-6'];
+  // Look up rates from models.js — the single source of truth.
+  const m = findModel(modelId) || findModel(DEFAULT_MODEL_ID);
   const inputTokens = 2500;
   const outputTokens = 1800;
-  return count * ((inputTokens / 1000000) * rate.input + (outputTokens / 1000000) * rate.output);
+  return count * ((inputTokens / 1e6) * m.inputCostPerMtok + (outputTokens / 1e6) * m.outputCostPerMtok);
 }
 
 function renderBatch() {
@@ -3603,6 +3607,9 @@ function showStatus(id, html, type) {
  * example). If ReferenceError, the script itself didn't parse.
  */
 document.addEventListener('DOMContentLoaded', function () {
+  // Populate the model dropdown from models.js before loadStorage() so the
+  // saved model preference (if any) can be selected on the freshly-built list.
+  populateModelSelect();
   loadStorage();
 
   // Tabs

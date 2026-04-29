@@ -8,20 +8,17 @@
  * can't request unapproved or expensive models.
  */
 
+// Models come from /models.js (single source of truth shared with the
+// browser AND with generate-stream.mjs). Bundled by esbuild at deploy time.
+const { MODELS } = require('../../models.js');
+
 const ALLOWED_ORIGINS = [
   'https://wp-poster.netlify.app'
 ];
 
 const MAX_PROMPT_CHARS = 20000;
 const MAX_TOKENS_CAP = 3000;
-
-// Current Claude models (as of April 2026). Update this list when
-// Anthropic releases new models or deprecates existing ones.
-const ALLOWED_MODELS = new Set([
-  'claude-haiku-4-5-20251001',   // Haiku 4.5 — $1 / $5 per MTok
-  'claude-sonnet-4-6',           // Sonnet 4.6 — $3 / $15 per MTok (NO date suffix, unlike 4.5)
-  'claude-opus-4-7'              // Opus 4.7 — $5 / $25 per MTok
-]);
+const ALLOWED_MODELS = new Set(MODELS.map((m) => m.id));
 
 exports.handler = async (event) => {
   const origin = event.headers.origin || event.headers.Origin || '';

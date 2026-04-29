@@ -433,11 +433,8 @@
       <p class="small-note">Applies to all clients. Cheaper models are faster and fine for iterating on a brief; use Opus only for final polish on important posts.</p>
       <div class="field">
         <label class="lbl" for="model-select">Model</label>
-        <select id="model-select">
-          <option value="claude-haiku-4-5-20251001">Haiku 4.5 — fastest, ~$0.007 per draft</option>
-          <option value="claude-sonnet-4-6" selected>Sonnet 4.6 — balanced, ~$0.022 per draft</option>
-          <option value="claude-opus-4-7">Opus 4.7 — highest quality, ~$0.035 per draft</option>
-        </select>
+        <!-- Options are populated at boot by populateModelSelect() from models.js. -->
+        <select id="model-select"></select>
       </div>
       <button class="btn btn-primary" id="save-model-btn">Save model</button>
       <span class="saved-indicator hidden" id="model-saved">✓ Saved</span>
@@ -474,6 +471,7 @@
   </div>
 </footer>
 
+<script src="models.js"></script>
 <script src="recovery.js"></script>
 <script src="app.js"></script>
 </body>
