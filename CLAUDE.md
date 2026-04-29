@@ -222,6 +222,16 @@ A typical operator's DevTools console shows 20-ish warnings from extensions on p
 3. The Export/Import feature writes them to a JSON file on the user's disk. This file must **never be emailed**. Acceptable channels: 1Password shared vault, Signal, Slack DM with disappearing messages. The filename is prefixed `ssp-clients-DO-NOT-EMAIL-YYYY-MM-DD.json` as a visual reminder.
 4. On migration to Tier 2 (server-side storage), the Export/Import feature should be deprecated. See DESIGN-DOC.md.
 
+## Batch + Campaign — what's shared, what isn't (yet)
+
+The two workflows have intentionally distinct user-facing models (one client × many topics vs. many clients × one topic), but their plumbing is the same. The shared helpers live in section 13b of `app.js`:
+
+- `recoverInterruptedRows(queue, persistFn, message)` — flips `generating`/`publishing` rows to `error: INTERRUPTED` on reload. Used by both `recoverInterruptedBatchRows` and `recoverInterruptedCampaignRows`.
+- `makeRunController(spec)` — factory returning `{start, finish, cancel}`. Replaced 6 near-identical functions (batch + campaign × start/finish/cancel) with a 14-line spec each.
+- `renderQueueProgress(ids, isRunning, done, total, label)` — used by Campaign. **Batch's progress uses its own implementation** because the no-arg call from `renderBatch()` computes totals from row statuses, which the helper doesn't do. Don't unify without adding the row-status fallback.
+
+What's still duplicated and worth extracting in a follow-up: `runBatchGenerate` / `runCampaignGenerate` (~80 LOC each) and the matching publish loops, plus `renderBatch` / `renderCampaign` (~156 LOC each). The differences are real (Batch substitutes session image filenames; Campaign looks up the per-row client; the `runWithConcurrency` `isRunning` callback gotcha below) so the extraction needs unit tests for the new helper before shipping.
+
 ## Batch and Campaign run loops — shared helper gotcha
 
 `runWithConcurrency(items, worker, onDone, isRunning)` is shared by Batch and Campaign.

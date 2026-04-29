@@ -1868,6 +1868,108 @@ async function deletePost(postId, rowElement, title) {
   }
 }
 
+/* ---------- 13b. queue-mode shared helpers ---------- */
+
+/**
+ * Walk a queue's rows and flip any in-flight ('generating' / 'publishing')
+ * row to 'error' with code 'INTERRUPTED'. Used on page load by both Batch
+ * and Campaign — a 'publishing' row may have succeeded on WordPress even
+ * though the browser never saw the response, so silent retry could create
+ * duplicates. The operator verifies in WP and retries explicitly.
+ *
+ * Pure transform on `queue.rows`; persists via the supplied callback.
+ */
+function recoverInterruptedRows(queue, persistFn, message) {
+  if (!queue || !Array.isArray(queue.rows)) return;
+  let changed = false;
+  queue.rows.forEach(function (row) {
+    if (row.status === 'generating' || row.status === 'publishing') {
+      const phase = row.status === 'generating' ? 'generate' : 'publish';
+      row.status = 'error';
+      row.lastError = {
+        phase: phase, code: 'INTERRUPTED',
+        message: message || 'The browser closed or reloaded while this row was in flight. Verify in WordPress before retrying a publish.',
+        ts: Date.now()
+      };
+      changed = true;
+    }
+  });
+  if (changed && typeof persistFn === 'function') persistFn();
+}
+
+/**
+ * Factory for a run-control state machine (start / finish / cancel) that
+ * Batch and Campaign each used to implement separately. The spec captures
+ * the small differences:
+ *
+ *   stateSlot       reference to state.batchRun or state.campaignRun
+ *   getQueue        function returning the queue (or null)
+ *   render          function to call after state changes
+ *   persistQueue    function to write the queue to localStorage
+ *   readyStatusFor  function(row) → string status to flip to on cancel
+ *                   when there's no generated content yet
+ *   statusElId      DOM id of the status banner
+ *   label           human label for cancel banners ("Batch" / "Campaign")
+ *
+ * Returns {start, finish, cancel} bound to that workflow.
+ */
+function makeRunController(spec) {
+  function start(phase) {
+    spec.stateSlot.running = true;
+    spec.stateSlot.phase = phase;
+    spec.stateSlot.abortController = new AbortController();
+    spec.render();
+  }
+  function finish() {
+    spec.stateSlot.running = false;
+    spec.stateSlot.phase = null;
+    spec.stateSlot.abortController = null;
+    spec.render();
+  }
+  function cancel() {
+    if (!spec.stateSlot.running) return;
+    if (spec.stateSlot.abortController) spec.stateSlot.abortController.abort();
+    const phase = spec.stateSlot.phase;
+    const queue = spec.getQueue();
+    if (queue) {
+      queue.rows.forEach(function (row) {
+        if (row.status === 'generating' || row.status === 'publishing') {
+          row.status = row.generated ? 'generated' : spec.readyStatusFor(row);
+          row.lastError = { phase: phase, code: 'ABORTED', message: 'Cancelled by operator.', ts: Date.now() };
+        }
+      });
+      spec.persistQueue();
+    }
+    finish();
+    showStatus(spec.statusElId, spec.label + ' ' + phase + ' cancelled.', 'warning');
+  }
+  return { start: start, finish: finish, cancel: cancel };
+}
+
+/**
+ * Shared progress-bar renderer used by both Batch and Campaign. The DOM
+ * element IDs differ between the two tabs but the math is identical.
+ *
+ *   ids       { boxId, fillId, textId }
+ *   isRunning function returning true while the workflow is mid-run
+ *   done, total, label  the standard runWithConcurrency callback args
+ */
+function renderQueueProgress(ids, isRunning, done, total, label) {
+  const box = document.getElementById(ids.boxId);
+  const fill = document.getElementById(ids.fillId);
+  const text = document.getElementById(ids.textId);
+  if (!box || !fill || !text) return;
+  if (!isRunning() && typeof total === 'undefined') {
+    box.classList.add('hidden');
+    return;
+  }
+  box.classList.remove('hidden');
+  const d = done || 0;
+  const t = total || 0;
+  fill.style.width = t ? Math.round((d / t) * 100) + '%' : '0%';
+  text.textContent = (label ? label + ' ' : '') + d + ' / ' + t;
+}
+
 /* ---------- 14. batch ---------- */
 
 function emptyBatchQueue(clientId) {
@@ -1926,22 +2028,7 @@ function normalizeBatchQueue(q) {
 }
 
 function recoverInterruptedBatchRows() {
-  if (!state.batchQueue) return;
-  let changed = false;
-  state.batchQueue.rows.forEach(function (row) {
-    if (row.status === 'generating' || row.status === 'publishing') {
-      const interruptedPhase = row.status === 'generating' ? 'generate' : 'publish';
-      row.status = 'error';
-      row.lastError = {
-        phase: interruptedPhase,
-        code: 'INTERRUPTED',
-        message: 'The browser closed or reloaded while this row was in flight. Verify in WordPress before retrying a publish.',
-        ts: Date.now()
-      };
-      changed = true;
-    }
-  });
-  if (changed) persistBatchQueue();
+  recoverInterruptedRows(state.batchQueue, persistBatchQueue);
 }
 
 function persistBatchQueue() {
@@ -2531,37 +2618,28 @@ async function runWithConcurrency(items, worker, onDone, isRunning) {
   await Promise.all(workers);
 }
 
-function startBatchRun(phase) {
-  state.batchRun.running = true;
-  state.batchRun.phase = phase;
-  state.batchRun.abortController = new AbortController();
-  renderBatch();
-}
+// Run-control state machine for the Batch workflow. Spec captures the
+// few Batch-specific differences; logic is shared with Campaign via
+// makeRunController() in section 13b.
+const batchRunCtrl = makeRunController({
+  stateSlot: state.batchRun,
+  getQueue: function () { return state.batchQueue; },
+  render: function () { renderBatch(); },
+  persistQueue: persistBatchQueue,
+  readyStatusFor: function (row) { return isBatchBriefReady(row) ? 'ready' : 'empty'; },
+  statusElId: 'batch-status',
+  label: 'Batch'
+});
+function startBatchRun(phase) { batchRunCtrl.start(phase); }
+function finishBatchRun() { batchRunCtrl.finish(); }
+function cancelBatchRun() { batchRunCtrl.cancel(); }
 
-function finishBatchRun() {
-  state.batchRun.running = false;
-  state.batchRun.phase = null;
-  state.batchRun.abortController = null;
-  renderBatch();
-}
-
-function cancelBatchRun() {
-  if (!state.batchRun.running) return;
-  if (state.batchRun.abortController) state.batchRun.abortController.abort();
-  const phase = state.batchRun.phase;
-  if (state.batchQueue) {
-    state.batchQueue.rows.forEach(function (row) {
-      if (row.status === 'generating' || row.status === 'publishing') {
-        row.status = row.generated ? 'generated' : (isBatchBriefReady(row) ? 'ready' : 'empty');
-        row.lastError = { phase: phase, code: 'ABORTED', message: 'Cancelled by operator.', ts: Date.now() };
-      }
-    });
-    persistBatchQueue();
-  }
-  finishBatchRun();
-  showStatus('batch-status', 'Batch ' + phase + ' cancelled.', 'warning');
-}
-
+// NOT shared with renderQueueProgress: Batch's no-arg call site
+// (inside renderBatch) computes totals/done from row statuses, while
+// Campaign's progress is always called with explicit numbers. Unifying
+// would require adding the row-status fallback to the helper, and the
+// helper is currently smaller/simpler. Keep separate; revisit only if a
+// third queue mode shows up.
 function renderBatchProgress(done, total, label) {
   const box = document.getElementById('batch-progress');
   const fill = document.getElementById('batch-progress-fill');
@@ -2832,22 +2910,11 @@ function generateCampaignRowId() {
 }
 
 function recoverInterruptedCampaignRows() {
-  if (!state.campaignQueue) return;
-  let changed = false;
-  state.campaignQueue.rows.forEach(function (row) {
-    if (row.status === 'generating' || row.status === 'publishing') {
-      const phase = row.status === 'generating' ? 'generate' : 'publish';
-      row.status = 'error';
-      row.lastError = {
-        phase: phase,
-        code: 'INTERRUPTED',
-        message: 'The browser closed or reloaded while this campaign row was in flight. Verify WordPress before retrying a send.',
-        ts: Date.now()
-      };
-      changed = true;
-    }
-  });
-  if (changed) persistCampaignQueue();
+  recoverInterruptedRows(
+    state.campaignQueue,
+    persistCampaignQueue,
+    'The browser closed or reloaded while this campaign row was in flight. Verify WordPress before retrying a send.'
+  );
 }
 
 function campaignStatusMeta(status) {
@@ -3245,51 +3312,30 @@ function buildCampaignPrompt(client, row) {
   return prompt;
 }
 
-function startCampaignRun(phase) {
-  state.campaignRun.running = true;
-  state.campaignRun.phase = phase;
-  state.campaignRun.abortController = new AbortController();
-  renderCampaign();
-}
-
-function finishCampaignRun() {
-  state.campaignRun.running = false;
-  state.campaignRun.phase = null;
-  state.campaignRun.abortController = null;
-  renderCampaign();
-}
-
-function cancelCampaignRun() {
-  if (!state.campaignRun.running) return;
-  if (state.campaignRun.abortController) state.campaignRun.abortController.abort();
-  const phase = state.campaignRun.phase;
-  if (state.campaignQueue) {
-    state.campaignQueue.rows.forEach(function (row) {
-      if (row.status === 'generating' || row.status === 'publishing') {
-        row.status = row.generated ? 'generated' : 'ready';
-        row.lastError = { phase: phase, code: 'ABORTED', message: 'Cancelled by operator.', ts: Date.now() };
-      }
-    });
-    persistCampaignQueue();
-  }
-  finishCampaignRun();
-  showStatus('campaign-status', 'Campaign ' + phase + ' cancelled.', 'warning');
-}
+// Run-control state machine for the Campaign workflow. Shared logic via
+// makeRunController() (section 13b). Campaign rows only ever go to
+// 'ready' on cancel — there's no "empty" sub-state because rows must
+// have a clientId to exist at all.
+const campaignRunCtrl = makeRunController({
+  stateSlot: state.campaignRun,
+  getQueue: function () { return state.campaignQueue; },
+  render: function () { renderCampaign(); },
+  persistQueue: persistCampaignQueue,
+  readyStatusFor: function () { return 'ready'; },
+  statusElId: 'campaign-status',
+  label: 'Campaign'
+});
+function startCampaignRun(phase) { campaignRunCtrl.start(phase); }
+function finishCampaignRun() { campaignRunCtrl.finish(); }
+function cancelCampaignRun() { campaignRunCtrl.cancel(); }
 
 function renderCampaignProgress(done, total, label) {
-  const box = document.getElementById('campaign-progress');
-  const fill = document.getElementById('campaign-progress-fill');
-  const text = document.getElementById('campaign-progress-label');
-  if (!box || !fill || !text) return;
-  if (!state.campaignRun.running && typeof total === 'undefined') {
-    box.classList.add('hidden');
-    return;
-  }
-  box.classList.remove('hidden');
-  const d = done || 0;
-  const t = total || (state.campaignQueue ? state.campaignQueue.rows.length : 0);
-  fill.style.width = t ? Math.round((d / t) * 100) + '%' : '0%';
-  text.textContent = (label ? label + ' ' : '') + d + ' / ' + t;
+  const fallbackTotal = state.campaignQueue ? state.campaignQueue.rows.length : 0;
+  return renderQueueProgress(
+    { boxId: 'campaign-progress', fillId: 'campaign-progress-fill', textId: 'campaign-progress-label' },
+    function () { return state.campaignRun.running; },
+    done, total || fallbackTotal, label
+  );
 }
 
 async function runCampaignGenerate(targetRows) {
