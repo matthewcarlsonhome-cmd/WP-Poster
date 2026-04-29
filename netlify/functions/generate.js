@@ -1,143 +1,50 @@
 /**
  * Netlify Function: /.netlify/functions/generate
  *
- * Proxies Claude API calls. The Anthropic API key lives in the
- * ANTHROPIC_API_KEY environment variable — never in the browser.
+ * Legacy buffered Anthropic proxy. The current browser uses
+ * /.netlify/functions/generate-stream instead because long Batch/Campaign
+ * generations could exceed Netlify's inactivity timeout while waiting for
+ * the full buffered response.
  *
- * Allowed models are checked against an allowlist so the browser
- * can't request unapproved or expensive models.
+ * Kept around as a fallback contract — same validation, same allowlist,
+ * via _shared.js. If you are touching this file, also touch
+ * generate-stream.mjs and verify both deploy together.
  */
 
-// Models come from /models.js (single source of truth shared with the
-// browser AND with generate-stream.mjs). Bundled by esbuild at deploy time.
-const { MODELS } = require('../../models.js');
-
-const ALLOWED_ORIGINS = [
-  'https://wp-poster.netlify.app'
-];
-
-const MAX_PROMPT_CHARS = 20000;
-const MAX_TOKENS_CAP = 3000;
-const ALLOWED_MODELS = new Set(MODELS.map((m) => m.id));
+const { corsHeaders, isAllowedOrigin, validateRequest } = require('./_shared.js');
 
 exports.handler = async (event) => {
   const origin = event.headers.origin || event.headers.Origin || '';
-  const corsOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
-
-  const baseHeaders = {
-    'Access-Control-Allow-Origin': corsOrigin,
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Vary': 'Origin',
+  const baseHeaders = Object.assign({}, corsHeaders(origin), {
     'Content-Type': 'application/json'
-  };
+  });
 
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 204, headers: baseHeaders, body: '' };
   }
 
   if (event.httpMethod !== 'POST') {
-    return {
-      statusCode: 405,
-      headers: baseHeaders,
-      body: JSON.stringify({ error: 'Method not allowed' })
-    };
+    return reply(405, baseHeaders, { error: 'Method not allowed' });
   }
 
-  if (!ALLOWED_ORIGINS.includes(origin)) {
-    return {
-      statusCode: 403,
-      headers: baseHeaders,
-      body: JSON.stringify({ error: 'Origin not allowed' })
-    };
+  if (!isAllowedOrigin(origin)) {
+    return reply(403, baseHeaders, { error: 'Origin not allowed' });
   }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return {
-      statusCode: 500,
-      headers: baseHeaders,
-      body: JSON.stringify({ error: 'Server misconfigured: ANTHROPIC_API_KEY not set' })
-    };
+    return reply(500, baseHeaders, { error: 'Server misconfigured: ANTHROPIC_API_KEY not set' });
   }
 
   let payload;
   try {
     payload = JSON.parse(event.body || '{}');
-  } catch (e) {
-    return {
-      statusCode: 400,
-      headers: baseHeaders,
-      body: JSON.stringify({ error: 'Invalid JSON body' })
-    };
+  } catch (_) {
+    return reply(400, baseHeaders, { error: 'Invalid JSON body' });
   }
 
-  const { model, max_tokens, messages } = payload;
-
-  if (!model || !ALLOWED_MODELS.has(model)) {
-    // Echo both the requested model and the server's current allowlist so
-    // the browser's diagnostic layer can identify deploy skew (browser
-    // sending a model that the server's older allowlist doesn't accept).
-    return {
-      statusCode: 400,
-      headers: baseHeaders,
-      body: JSON.stringify({
-        error: 'Model not allowed',
-        requested: model || null,
-        allowed: Array.from(ALLOWED_MODELS)
-      })
-    };
-  }
-
-  if (!Number.isInteger(max_tokens) || max_tokens < 1 || max_tokens > MAX_TOKENS_CAP) {
-    return {
-      statusCode: 400,
-      headers: baseHeaders,
-      body: JSON.stringify({ error: `max_tokens must be an integer between 1 and ${MAX_TOKENS_CAP}` })
-    };
-  }
-
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return {
-      statusCode: 400,
-      headers: baseHeaders,
-      body: JSON.stringify({ error: 'messages must be a non-empty array' })
-    };
-  }
-
-  let totalChars = 0;
-  for (const m of messages) {
-    if (!m || typeof m !== 'object') {
-      return {
-        statusCode: 400,
-        headers: baseHeaders,
-        body: JSON.stringify({ error: 'invalid message format' })
-      };
-    }
-    if (m.role !== 'user' && m.role !== 'assistant') {
-      return {
-        statusCode: 400,
-        headers: baseHeaders,
-        body: JSON.stringify({ error: 'message role must be user or assistant' })
-      };
-    }
-    if (typeof m.content !== 'string') {
-      return {
-        statusCode: 400,
-        headers: baseHeaders,
-        body: JSON.stringify({ error: 'message content must be a string' })
-      };
-    }
-    totalChars += m.content.length;
-  }
-
-  if (totalChars > MAX_PROMPT_CHARS) {
-    return {
-      statusCode: 413,
-      headers: baseHeaders,
-      body: JSON.stringify({ error: `Prompt too large (${totalChars} chars, max ${MAX_PROMPT_CHARS})` })
-    };
-  }
+  const v = validateRequest(payload);
+  if (!v.ok) return reply(v.status, baseHeaders, v.body);
 
   try {
     const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
@@ -147,22 +54,16 @@ exports.handler = async (event) => {
         'x-api-key': apiKey,
         'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify({ model, max_tokens, messages })
+      body: JSON.stringify({ model: v.model, max_tokens: v.max_tokens, messages: v.messages })
     });
-
     const body = await anthropicRes.text();
-
-    return {
-      statusCode: anthropicRes.status,
-      headers: baseHeaders,
-      body: body
-    };
+    return { statusCode: anthropicRes.status, headers: baseHeaders, body: body };
   } catch (err) {
     console.error('Anthropic request failed:', err);
-    return {
-      statusCode: 502,
-      headers: baseHeaders,
-      body: JSON.stringify({ error: 'Upstream request failed' })
-    };
+    return reply(502, baseHeaders, { error: 'Upstream request failed' });
   }
 };
+
+function reply(statusCode, headers, bodyObj) {
+  return { statusCode, headers, body: JSON.stringify(bodyObj) };
+}

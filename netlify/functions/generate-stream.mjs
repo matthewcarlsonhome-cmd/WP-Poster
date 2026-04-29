@@ -4,30 +4,14 @@
  * Streams Anthropic message events through Netlify instead of buffering the
  * full response. This avoids Netlify's inactivity timeout on longer draft
  * generations because bytes flow back to the browser while Claude is writing.
+ *
+ * Validation + CORS live in _shared.js so this function and generate.js can
+ * never drift on their allowlist or payload caps.
  */
 
-// Models come from /models.js (single source of truth shared with the
-// browser AND with generate.js). Bundled by esbuild at deploy time.
-import models from '../../models.js';
-const { MODELS } = models;
-
-const ALLOWED_ORIGINS = [
-  'https://wp-poster.netlify.app'
-];
-
-const MAX_PROMPT_CHARS = 20000;
-const MAX_TOKENS_CAP = 3000;
-const ALLOWED_MODELS = new Set(MODELS.map((m) => m.id));
-
-function corsHeaders(origin) {
-  const corsOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
-  return {
-    'Access-Control-Allow-Origin': corsOrigin,
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type',
-    'Vary': 'Origin'
-  };
-}
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { corsHeaders, isAllowedOrigin, validateRequest } = require('./_shared.js');
 
 function jsonResponse(status, origin, body) {
   return new Response(JSON.stringify(body), {
@@ -49,7 +33,7 @@ export default async function handler(request) {
     return jsonResponse(405, origin, { error: 'Method not allowed' });
   }
 
-  if (!ALLOWED_ORIGINS.includes(origin)) {
+  if (!isAllowedOrigin(origin)) {
     return jsonResponse(403, origin, { error: 'Origin not allowed' });
   }
 
@@ -65,41 +49,8 @@ export default async function handler(request) {
     return jsonResponse(400, origin, { error: 'Invalid JSON body' });
   }
 
-  const { model, max_tokens, messages } = payload;
-
-  if (!model || !ALLOWED_MODELS.has(model)) {
-    return jsonResponse(400, origin, {
-      error: 'Model not allowed',
-      requested: model || null,
-      allowed: Array.from(ALLOWED_MODELS)
-    });
-  }
-
-  if (!Number.isInteger(max_tokens) || max_tokens < 1 || max_tokens > MAX_TOKENS_CAP) {
-    return jsonResponse(400, origin, { error: `max_tokens must be an integer between 1 and ${MAX_TOKENS_CAP}` });
-  }
-
-  if (!Array.isArray(messages) || messages.length === 0) {
-    return jsonResponse(400, origin, { error: 'messages must be a non-empty array' });
-  }
-
-  let totalChars = 0;
-  for (const m of messages) {
-    if (!m || typeof m !== 'object') {
-      return jsonResponse(400, origin, { error: 'invalid message format' });
-    }
-    if (m.role !== 'user' && m.role !== 'assistant') {
-      return jsonResponse(400, origin, { error: 'message role must be user or assistant' });
-    }
-    if (typeof m.content !== 'string') {
-      return jsonResponse(400, origin, { error: 'message content must be a string' });
-    }
-    totalChars += m.content.length;
-  }
-
-  if (totalChars > MAX_PROMPT_CHARS) {
-    return jsonResponse(413, origin, { error: `Prompt too large (${totalChars} chars, max ${MAX_PROMPT_CHARS})` });
-  }
+  const v = validateRequest(payload);
+  if (!v.ok) return jsonResponse(v.status, origin, v.body);
 
   const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -108,7 +59,7 @@ export default async function handler(request) {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01'
     },
-    body: JSON.stringify({ model, max_tokens, messages, stream: true })
+    body: JSON.stringify({ model: v.model, max_tokens: v.max_tokens, messages: v.messages, stream: true })
   });
 
   if (!anthropicRes.ok) {
